@@ -1,0 +1,10 @@
+# /etc/caddy/Caddyfile
+# Replace YOURNAME.duckdns.org with your domain. Caddy issues the Let's Encrypt certificate itself.
+YOURNAME.duckdns.org {
+    encode gzip
+    reverse_proxy 127.0.0.1:8010 {
+        # The app checks the Host header (DNS-rebinding protection), so present the upstream host.
+        header_up Host {upstream_hostport}
+        header_up X-Forwarded-Proto https
+    }
+}

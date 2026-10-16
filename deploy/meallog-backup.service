@@ -1,0 +1,8 @@
+[Unit]
+Description=MealLog SQLite backup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meallog
+EnvironmentFile=/opt/meallog/.env
+ExecStart=/opt/meallog/.venv/bin/python scripts/backup.py

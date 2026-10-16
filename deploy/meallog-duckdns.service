@@ -1,0 +1,7 @@
+[Unit]
+Description=MealLog DuckDNS keep-alive
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meallog
+ExecStart=/bin/bash /opt/meallog/deploy/duck.sh

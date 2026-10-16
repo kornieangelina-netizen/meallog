@@ -1,0 +1,9 @@
+[Unit]
+Description=MealLog daily meal plan
+After=meallog.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meallog
+EnvironmentFile=/opt/meallog/.env
+ExecStart=/opt/meallog/.venv/bin/python scripts/daily_plan.py

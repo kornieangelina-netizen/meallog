@@ -1,0 +1,78 @@
+# MealLog
+
+Личный дневник питания, где интерфейсом служит Claude. Фото тарелки или этикетки в чат Claude,
+он считает КБЖУ и через MCP-коннектор записывает в твою базу. На телефоне PWA с журналом,
+планом на день, холодильником, аналитикой и целями.
+
+## Устройство
+
+```
+Claude (iPhone / web) ──MCP──▶ /mcp/<секрет> ─┐
+PWA на телефоне       ──REST─▶ /api/*        ─┤ server.py (FastMCP/MCPServer + Starlette) ─▶ data/meals.db
+                      ──GET──▶ /             ─┘
+Caddy: HTTPS и домен, reverse proxy на 127.0.0.1:8010
+systemd-таймеры: 03:00 бэкап · 04:00 DuckDNS · 07:00 план на день
+```
+
+Файлы:
+
+| Файл | Что |
+|---|---|
+| `server.py` | MCP-инструменты для Claude, REST для PWA, вход по паролю, статика |
+| `db.py` | SQLite: `meals`, `products` (справочник + холодильник), `recommendations`, `goals`, `weight_log` |
+| `rules.md` | твои личные правила для Claude, попадают в инструкцию коннектора |
+| `scripts/daily_plan.py` | план на день через Claude API с проверкой лимитов |
+| `scripts/backup.py` | консистентный бэкап SQLite |
+| `webapp/` | PWA: `index.html`, `app.js`, `styles.css`, `service-worker.js` |
+| `deploy/` | Caddyfile, systemd service и timers, `install.sh` |
+
+## Установка на VPS (Ubuntu 24.04)
+
+```bash
+git clone https://github.com/kornieangelina-netizen/meallog /opt/meallog
+cd /opt/meallog && bash deploy/install.sh
+```
+
+Скрипт ставит Python, Caddy, создаёт `.env` с секретами и включает сервисы. Дальше руками:
+
+1. В `/opt/meallog/.env` задать `APP_PASSWORD` (пароль входа в PWA) и, если нужен план на день,
+   `ANTHROPIC_API_KEY`. Потом `systemctl restart meallog`.
+2. На duckdns.org привязать поддомен к IP сервера. В `/etc/caddy/Caddyfile` заменить
+   `YOURNAME.duckdns.org` на свой домен, `systemctl reload caddy`.
+3. Для keep-alive DuckDNS создать `/opt/meallog/duckdns.token` (chmod 600) со строками
+   `DOMAIN=имя` и `TOKEN=токен`, затем `systemctl enable --now meallog-duckdns.timer`.
+4. Коннектор: Claude → Settings → Connectors → Add custom connector →
+   URL `https://домен` + значение `MCP_PATH` из `.env`. Без OAuth.
+5. PWA: открыть `https://домен` в Safari, ввести пароль, «Поделиться → На экран „Домой“».
+
+## Локальный запуск
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env   # поправить значения
+set -a; source .env; set +a
+.venv/bin/python server.py
+.venv/bin/python -m unittest discover tests
+```
+
+## Инструменты коннектора
+
+`find_products` · `log_product` · `log_meal` · `save_product` · `list_fridge` · `day_summary` ·
+`list_meals` · `delete_meal` · `add_recommendation` · `clear_recommendations` · `list_recommendations` ·
+`set_product_flags` · `set_fridge` · `get_goals` · `set_goals` · `log_weight`
+
+Правила поведения живут в докстрингах инструментов и в `INSTRUCTIONS` в `server.py` плюс `rules.md`.
+
+## Безопасность
+
+MCP-эндпоинт без авторизации, защита только неугадываемым путём. Для личного дневника на одного
+человека это приемлемо. PWA и REST за паролем и cookie на год. Секреты только в `.env` (права 600).
+
+## Обновление
+
+```bash
+cd /opt/meallog && git pull && systemctl restart meallog
+```
+
+При изменении файлов в `webapp/` поднять версию `CACHE` в `service-worker.js`, тогда приложение
+на телефоне само перезагрузится при следующем открытии.
