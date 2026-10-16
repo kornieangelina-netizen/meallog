@@ -74,8 +74,14 @@ MCP-эндпоинт без авторизации, защита только н
 
 ## Обновление
 
+Сервер сам проверяет GitHub каждые 10 минут (`meallog-update.timer` → `deploy/update.sh`): если в `main`
+появились новые коммиты, он делает `git reset --hard origin/main`, ставит зависимости и перезапускает
+сервис. База `data/meals.db`, `.env` и бэкапы вне git и не трогаются. Так что обновление = merge в `main`.
+
+Если сервер ставился до появления таймера, один раз вручную:
+
 ```bash
-cd /opt/meallog && git pull && systemctl restart meallog
+cd /opt/meallog && git pull && bash deploy/update.sh
 ```
 
 При изменении файлов в `webapp/` поднять версию `CACHE` в `service-worker.js`, тогда приложение

@@ -435,8 +435,22 @@ def api_weight(request, conn, body):
 
 @api("/api/analytics", ["GET"])
 def api_analytics(request, conn, body):
-    days = max(7, min(90, int(request.query_params.get("days", "30"))))
-    return db.analytics(conn, days)
+    """?days=N (7..400) or ?days=all, or ?start=YYYY-MM-DD&end=YYYY-MM-DD."""
+    q = request.query_params
+    if q.get("start") or q.get("end"):
+        return db.analytics(conn, start=q.get("start"), end=q.get("end"))
+    raw = q.get("days", "30")
+    if raw == "all":
+        return db.analytics(conn, start=db.first_meal_date(conn) or db.today())
+    return db.analytics(conn, max(7, min(400, int(raw))))
+
+
+@api("/api/days", ["GET"])
+def api_days(request, conn, body):
+    """Per-day totals for the calendar: ?start=YYYY-MM-DD&end=YYYY-MM-DD (max ~1 year)."""
+    q = request.query_params
+    start, end = q.get("start") or db.today(), q.get("end") or db.today()
+    return {"days": db.day_totals(conn, start, end), "goals": db.get_goals(conn), "today": db.today()}
 
 
 # --------------------------------------------------------------------------- #

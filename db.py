@@ -499,46 +499,87 @@ def toggle_recommendation(conn, rec_id: int) -> dict | None:
 # analytics
 # --------------------------------------------------------------------------- #
 
-def analytics(conn, days: int = 30) -> dict:
-    end = now_local().date()
-    start = end - timedelta(days=days - 1)
-    rows = _rows(conn.execute(
-        """SELECT meal_date, SUM(kcal) kcal, SUM(protein) protein, SUM(fat) fat, SUM(carbs) carbs, COUNT(*) n
-           FROM meals WHERE meal_date BETWEEN ? AND ? GROUP BY meal_date ORDER BY meal_date""",
-        (start.isoformat(), end.isoformat())))
-    by_date = {r["meal_date"]: r for r in rows}
+def first_meal_date(conn) -> str | None:
+    r = conn.execute("SELECT MIN(meal_date) FROM meals").fetchone()
+    return r[0] if r and r[0] else None
+
+
+def day_totals(conn, start: str, end: str) -> list[dict]:
+    """Per-day sums for a date range (calendar dots, month picker). Days without entries are omitted."""
+    return _rows(conn.execute(
+        """SELECT meal_date date, SUM(kcal) kcal, SUM(protein) protein, SUM(fat) fat, SUM(carbs) carbs, COUNT(*) n
+           FROM meals WHERE meal_date BETWEEN ? AND ? GROUP BY meal_date ORDER BY meal_date""", (start, end)))
+
+
+def analytics(conn, days: int | None = 30, start: str | None = None, end: str | None = None) -> dict:
+    """Analytics for a window: either the last `days` days or an explicit start..end (inclusive).
+
+    Returns a dense daily series, averages over logged days, per-weekday and per-hour averages for
+    every nutrient, streak, top foods, weight and goals. Nothing is pre-selected by nutrient: the
+    PWA filters client-side so switching a chip does not hit the server.
+    """
+    end_d = date.fromisoformat(end) if end else now_local().date()
+    if start:
+        start_d = date.fromisoformat(start)
+    else:
+        start_d = end_d - timedelta(days=(days or 30) - 1)
+    if start_d > end_d:
+        start_d, end_d = end_d, start_d
+    s, e = start_d.isoformat(), end_d.isoformat()
+    by_date = {r["date"]: r for r in day_totals(conn, s, e)}
     series = []
-    d = start
-    while d <= end:
+    d = start_d
+    while d <= end_d:
         k = d.isoformat()
         r = by_date.get(k)
         series.append({"date": k, **({m: _r1(r[m]) for m in MACROS} if r else {m: 0 for m in MACROS}),
                        "n": r["n"] if r else 0})
         d += timedelta(days=1)
 
-    logged_days = [s for s in series if s["n"]]
-    avg = {m: (round(sum(s[m] for s in logged_days) / len(logged_days), 1) if logged_days else 0) for m in MACROS}
+    logged = [x for x in series if x["n"]]
+    avg = {m: (round(sum(x[m] for x in logged) / len(logged), 1) if logged else 0) for m in MACROS}
+
+    # per weekday (0 = Monday): average over logged days of that weekday
+    wd_sum = [{m: 0.0 for m in MACROS} for _ in range(7)]
+    wd_n = [0] * 7
+    for x in logged:
+        i = date.fromisoformat(x["date"]).weekday()
+        wd_n[i] += 1
+        for m in MACROS:
+            wd_sum[i][m] += x[m]
+    weekday = [{m: (round(wd_sum[i][m] / wd_n[i], 1) if wd_n[i] else 0) for m in MACROS} | {"n": wd_n[i]}
+               for i in range(7)]
+
+    # per hour: average per logged day, so the profile does not scale with window length
+    hours = [{m: 0.0 for m in MACROS} for _ in range(24)]
+    for r in conn.execute("SELECT logged_at, kcal, protein, fat, carbs FROM meals WHERE meal_date BETWEEN ? AND ?",
+                          (s, e)):
+        try:
+            h = datetime.fromisoformat(r["logged_at"]).hour
+        except ValueError:
+            continue
+        for m in MACROS:
+            hours[h][m] += float(r[m] or 0)
+    nd = max(1, len(logged))
+    hours = [{m: round(x[m] / nd, 1) for m in MACROS} for x in hours]
 
     # streak: consecutive days with at least one entry, ending today or yesterday
     streak = 0
-    d = end
     all_dates = {r[0] for r in conn.execute("SELECT DISTINCT meal_date FROM meals")}
-    if end.isoformat() not in all_dates:
-        d = end - timedelta(days=1)
+    d = now_local().date()
+    if d.isoformat() not in all_dates:
+        d -= timedelta(days=1)
     while d.isoformat() in all_dates:
         streak += 1
         d -= timedelta(days=1)
 
-    hours = [0.0] * 24
-    for r in conn.execute("SELECT logged_at, kcal FROM meals WHERE meal_date BETWEEN ? AND ?",
-                          (start.isoformat(), end.isoformat())):
-        try:
-            hours[datetime.fromisoformat(r["logged_at"]).hour] += float(r["kcal"])
-        except ValueError:
-            pass
     top = _rows(conn.execute(
-        """SELECT name, COUNT(*) n, SUM(kcal) kcal FROM meals WHERE meal_date BETWEEN ? AND ?
-           GROUP BY name ORDER BY n DESC, kcal DESC LIMIT 10""", (start.isoformat(), end.isoformat())))
-    return {"days": days, "series": series, "avg": avg, "streak": streak,
-            "hours": [round(h) for h in hours], "top": top,
-            "weight": list_weight(conn, days), "goals": get_goals(conn)}
+        """SELECT name, COUNT(*) n, ROUND(SUM(kcal)) kcal, ROUND(SUM(protein)) protein, ROUND(SUM(fat)) fat,
+                  ROUND(SUM(carbs)) carbs
+           FROM meals WHERE meal_date BETWEEN ? AND ? AND name NOT IN ('Завтрак', 'Обед', 'Ужин', 'Перекус',
+                 'Перекус 1', 'Перекус 2', 'Перекус/Другое')
+           GROUP BY name ORDER BY n DESC, kcal DESC LIMIT 10""", (s, e)))
+    weight = _rows(conn.execute("SELECT * FROM weight_log WHERE date BETWEEN ? AND ? ORDER BY date", (s, e)))
+    return {"start": s, "end": e, "days": len(series), "series": series, "avg": avg, "logged_days": len(logged),
+            "weekday": weekday, "hours": hours, "streak": streak, "top": top, "weight": weight,
+            "goals": get_goals(conn), "first_date": first_meal_date(conn)}
