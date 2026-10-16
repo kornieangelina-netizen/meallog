@@ -1,0 +1,8 @@
+[Unit]
+Description=MealLog self-update from GitHub main
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meallog
+ExecStart=/bin/bash /opt/meallog/deploy/update.sh

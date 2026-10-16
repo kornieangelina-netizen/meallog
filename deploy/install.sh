@@ -60,7 +60,7 @@ echo "DOMAIN=${DOMAIN}" > /opt/meallog/domain.env
 
 cp deploy/meallog.service deploy/meallog-*.service deploy/meallog-*.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now meallog meallog-backup.timer meallog-recs.timer
+systemctl enable --now meallog meallog-backup.timer meallog-recs.timer meallog-update.timer
 systemctl restart meallog
 [ -f /opt/meallog/duckdns.token ] && systemctl enable --now meallog-duckdns.timer || true
 systemctl enable --now caddy
