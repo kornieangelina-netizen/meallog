@@ -5,6 +5,7 @@
 
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+  const qty = (n) => String(Math.round(Number(n || 0) * 100) / 100).replace('.', ',');
   const fmt = (n, d = 0) => (n == null || isNaN(n) ? '–' : Number(n).toFixed(d).replace(/\.0$/, ''));
   const MACROS = ['kcal', 'protein', 'fat', 'carbs'];
   const MACRO_LABELS = { kcal: 'Калории', protein: 'Белки', fat: 'Жиры', carbs: 'Углеводы' };
@@ -359,7 +360,7 @@
       const body = Object.fromEntries(new FormData(e.target));
       if (state.date !== state.today) body.when = `${state.date}T12:00:00`;
       await api('/api/meals', { method: 'POST', body });
-      closeModal(); toast('Записано'); loadJournal();
+      closeModal(); toast('Записано'); state.goals = null; loadJournal();
     });
   }));
 
@@ -460,22 +461,26 @@
     el.className = 'item three';
     el.innerHTML = `
       <div class="actions">
-        <button class="alt" data-act="log">Съел</button>
+        <button class="alt" data-act="log">Съела</button>
         <button class="warn" data-act="urgent">${p.urgent ? 'Не срочно' : 'Срочно'}</button>
         <button data-act="del">Удалить</button>
       </div>
       <div class="row">
         <div><div class="name">${esc(p.name)}<span class="flags">${flags(p)}</span></div>
           <div class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${per}</div></div>
-        <div class="qty"><button data-d="-${step}">−</button><span>${fmt(p.fridge_qty)} ${unit}</span><button data-d="${step}">+</button></div>
+        <div class="side">
+          <div class="qty"><button data-d="-${step}">−</button><span>${qty(p.fridge_qty)} ${unit}</span><button data-d="${step}">+</button></div>
+          <button class="eat" data-act="eat">Съела</button>
+        </div>
       </div>`;
     $$('.qty button', el).forEach((b) => b.addEventListener('click', async (e) => {
       e.stopPropagation();
       const r = await api(`/api/products/${p.id}/fridge`, { method: 'POST', body: { delta: Number(b.dataset.d) } });
       p.fridge_qty = r.product.fridge_qty;
-      el.querySelector('.qty span').textContent = `${fmt(p.fridge_qty)} ${unit}`;
+      el.querySelector('.qty span').textContent = `${qty(p.fridge_qty)} ${unit}`;
     }));
     el.querySelector('[data-act=log]').addEventListener('click', () => quickLog(p));
+    el.querySelector('[data-act=eat]').addEventListener('click', (e) => { e.stopPropagation(); quickLog(p); });
     el.querySelector('[data-act=urgent]').addEventListener('click', async () => {
       await api(`/api/products/${p.id}/flags`, { method: 'POST', body: { urgent: !p.urgent } });
       loadProducts();
@@ -490,21 +495,62 @@
     return el;
   }
 
+  // log a catalogue product in any amount: grams or portions, linked both ways when the portion weight is known
   function quickLog(p) {
     if (!p) return;
     const isPortion = p.basis === 'portion';
+    const pg = Number(p.grams) || 0;           // weight of one portion (may be unknown)
+    const both = pg > 0;                        // can convert grams <-> portions
+    const per = isPortion ? p : { kcal: p.kcal * pg / 100, protein: p.protein * pg / 100, fat: p.fat * pg / 100, carbs: p.carbs * pg / 100 };
+    const chips = (isPortion || both)
+      ? [['¼', 0.25], ['½', 0.5], ['¾', 0.75], ['1', 1], ['1½', 1.5], ['2', 2]].map(([t, v]) => `<button type="button" data-portions="${v}">${t} порц.</button>`)
+      : [50, 100, 150, 200, 250, 300].map((g) => `<button type="button" data-grams="${g}">${g} г</button>`);
     openModal(`
       <h3>${esc(p.name)}</h3>
+      <p class="muted" style="margin:-6px 0 10px">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${isPortion ? `порцию${pg ? ` ${fmt(pg)} г` : ''}` : '100 г'}${p.fridge_qty > 0 ? ` · в холодильнике ${qty(p.fridge_qty)} ${isPortion ? 'шт' : 'г'}` : ''}</p>
+      <div class="quick" id="amount-chips">${chips.join('')}</div>
       <form class="form" id="log-form">
-        <label>${isPortion ? 'Порций' : 'Граммов'} <input name="qty" type="number" inputmode="decimal" step="any" value="${isPortion ? 1 : (p.grams || 100)}" required></label>
-        <button class="btn" type="submit">Записать</button>
+        <div class="row2">
+          ${isPortion || both ? `<label>Порций <input name="portions" type="number" inputmode="decimal" step="any" min="0" value="${isPortion ? 1 : ''}"></label>` : ''}
+          ${!isPortion || both ? `<label>Граммов <input name="grams" type="number" inputmode="decimal" step="any" min="0" value="${isPortion ? (pg || '') : (pg || 100)}"></label>` : ''}
+        </div>
+        <p class="muted" id="amount-preview" style="margin:4px 2px 0"></p>
+        <button class="btn" type="submit">Записать в журнал</button>
       </form>`, (el) => {
-      el.querySelector('form').addEventListener('submit', async (e) => {
+      const f = el.querySelector('form');
+      const pIn = f.portions, gIn = f.grams;
+      const amount = () => {
+        const portions = pIn ? Number(pIn.value) : 0, grams = gIn ? Number(gIn.value) : 0;
+        if (isPortion) return { portions: portions || (both && grams ? grams / pg : 0), grams: grams || (portions * pg) };
+        return { grams: grams || (both ? portions * pg : 0), portions: both ? (grams || portions * pg) / pg : null };
+      };
+      const preview = () => {
+        const a = amount();
+        const factor = isPortion ? a.portions : a.grams / 100;
+        const v = (k) => fmt(p[k] * factor);
+        el.querySelector('#amount-preview').innerHTML = factor > 0
+          ? `Будет записано: <b>${v('kcal')} ккал</b> · Б ${v('protein')} · Ж ${v('fat')} · У ${v('carbs')}${a.grams ? ` · ${fmt(a.grams)} г` : ''}`
+          : 'Укажи количество';
+      };
+      // typing in one field recalculates the other
+      pIn && pIn.addEventListener('input', () => { if (both && gIn) gIn.value = pIn.value ? fmt(Number(pIn.value) * pg) : ''; preview(); });
+      gIn && gIn.addEventListener('input', () => { if (both && pIn) pIn.value = gIn.value ? fmt(Number(gIn.value) / pg, 2) : ''; preview(); });
+      $$('#amount-chips button', el).forEach((b) => b.addEventListener('click', () => {
+        if (b.dataset.portions) { pIn.value = b.dataset.portions; if (both && gIn) gIn.value = fmt(Number(b.dataset.portions) * pg); }
+        else { gIn.value = b.dataset.grams; if (both && pIn) pIn.value = fmt(Number(b.dataset.grams) / pg, 2); }
+        preview();
+      }));
+      preview();
+      f.addEventListener('submit', async (e) => {
         e.preventDefault();
-        const qty = Number(e.target.qty.value);
-        const body = { product_id: p.id, [isPortion ? 'portions' : 'grams']: qty };
+        const a = amount();
+        const body = { product_id: p.id };
+        if (isPortion) { if (!a.portions) return toast('Укажи количество'); body.portions = a.portions; }
+        else { if (!a.grams) return toast('Укажи количество'); body.grams = a.grams; }
+        if (state.date !== state.today) body.when = `${state.date}T12:00:00`;
         const r = await api('/api/meals', { method: 'POST', body });
         closeModal(); toast(`Записано: ${fmt(r.meal.kcal)} ккал`);
+        state.goals = null; // day totals changed: refetch calendar rings
         if (state.tab === 'products') loadProducts(); else loadJournal();
       });
     });

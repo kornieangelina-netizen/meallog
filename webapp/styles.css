@@ -184,6 +184,10 @@ input[type=search] { margin-top: 12px; }
 
 .cat { margin: 16px 2px 6px; font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase;
   letter-spacing: .06em; }
+.side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
+.eat { border: 0; border-radius: 16px; padding: 5px 14px; font-size: 13px; font-weight: 600; color: #fff;
+  background: linear-gradient(135deg, #8a7bff, #4f8cff); box-shadow: 0 3px 10px rgba(92, 120, 255, .35); }
+.quick button[data-portions], .quick button[data-grams] { background: var(--card-2); border: 1px solid var(--line); color: var(--text); }
 .qty { display: flex; align-items: center; gap: 4px; }
 .qty button { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line); background: var(--card-2);
   color: var(--text); }
