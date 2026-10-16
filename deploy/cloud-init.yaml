@@ -1,0 +1,22 @@
+#cloud-config
+# Paste this into the "Cloud config" field when creating the server in Hetzner Cloud.
+# Replace the three REPLACE_* values first (scripts/make_cloud_init.py does it for you).
+# The server installs MealLog on first boot and serves it at https://<ip-with-dashes>.sslip.io
+package_update: true
+packages:
+  - git
+  - python3-venv
+  - python3-pip
+  - sqlite3
+  - curl
+write_files:
+  - path: /opt/meallog-bootstrap.env
+    permissions: "0600"
+    content: |
+      APP_PASSWORD=REPLACE_APP_PASSWORD
+      APP_COOKIE=REPLACE_APP_COOKIE
+      MCP_PATH=REPLACE_MCP_PATH
+      ANTHROPIC_API_KEY=
+runcmd:
+  - git clone https://github.com/kornieangelina-netizen/meallog /opt/meallog
+  - bash /opt/meallog/deploy/install.sh

@@ -28,22 +28,26 @@ systemd-таймеры: 03:00 бэкап · 04:00 DuckDNS · 07:00 план на
 
 ## Установка на VPS (Ubuntu 24.04)
 
+Самый простой путь, без SSH: при создании сервера в Hetzner Cloud вставить в поле «Cloud config»
+вывод `python3 scripts/make_cloud_init.py`. Сервер сам ставит всё при первой загрузке и открывает
+приложение по адресу `https://<ip-через-дефисы>.sslip.io` (домен регистрировать не нужно).
+
+Вручную:
+
 ```bash
 git clone https://github.com/kornieangelina-netizen/meallog /opt/meallog
-cd /opt/meallog && bash deploy/install.sh
+DOMAIN=yourname.duckdns.org bash /opt/meallog/deploy/install.sh   # DOMAIN необязателен
 ```
 
-Скрипт ставит Python, Caddy, создаёт `.env` с секретами и включает сервисы. Дальше руками:
+Скрипт ставит Python и Caddy, создаёт `.env` с секретами, пишет Caddyfile и включает сервисы.
+В конце печатает адрес приложения и URL коннектора. Дальше:
 
-1. В `/opt/meallog/.env` задать `APP_PASSWORD` (пароль входа в PWA) и, если нужен план на день,
-   `ANTHROPIC_API_KEY`. Потом `systemctl restart meallog`.
-2. На duckdns.org привязать поддомен к IP сервера. В `/etc/caddy/Caddyfile` заменить
-   `YOURNAME.duckdns.org` на свой домен, `systemctl reload caddy`.
-3. Для keep-alive DuckDNS создать `/opt/meallog/duckdns.token` (chmod 600) со строками
+1. Если нужен план на день, в `/opt/meallog/.env` задать `ANTHROPIC_API_KEY`, затем
+   `systemctl restart meallog`. Пароль входа в PWA тоже лежит в `.env` (`APP_PASSWORD`).
+2. Если используете DuckDNS, создать `/opt/meallog/duckdns.token` (chmod 600) со строками
    `DOMAIN=имя` и `TOKEN=токен`, затем `systemctl enable --now meallog-duckdns.timer`.
-4. Коннектор: Claude → Settings → Connectors → Add custom connector →
-   URL `https://домен` + значение `MCP_PATH` из `.env`. Без OAuth.
-5. PWA: открыть `https://домен` в Safari, ввести пароль, «Поделиться → На экран „Домой“».
+3. Коннектор: Claude → Settings → Connectors → Add custom connector → URL из вывода скрипта. Без OAuth.
+4. PWA: открыть адрес приложения в Safari, ввести пароль, «Поделиться → На экран „Домой“».
 
 ## Локальный запуск
 
