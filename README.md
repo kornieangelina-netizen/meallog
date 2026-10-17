@@ -19,7 +19,7 @@ systemd-таймеры: 03:00 бэкап · 04:00 DuckDNS · 07:00 план на
 | Файл | Что |
 |---|---|
 | `server.py` | MCP-инструменты для Claude, REST для PWA, вход по паролю, статика |
-| `db.py` | SQLite: `meals`, `products` (справочник + холодильник), `recommendations`, `goals`, `weight_log` |
+| `db.py` | SQLite: `meals` (с приёмом `slot`), `products` (справочник + холодильник), `recipes` + `recipe_items`, `recommendations`, `goals`, `weight_log`, `measurements` |
 | `rules.md` | твои личные правила для Claude, попадают в инструкцию коннектора |
 | `scripts/daily_plan.py` | план на день через Claude API с проверкой лимитов |
 | `scripts/backup.py` | консистентный бэкап SQLite |
@@ -63,7 +63,8 @@ set -a; source .env; set +a
 
 `find_products` · `log_product` · `log_meal` · `save_product` · `list_fridge` · `day_summary` ·
 `list_meals` · `delete_meal` · `add_recommendation` · `clear_recommendations` · `list_recommendations` ·
-`set_product_flags` · `set_fridge` · `get_goals` · `set_goals` · `log_weight`
+`set_product_flags` · `set_fridge` · `get_goals` · `set_goals` · `log_weight` · `update_meal` ·
+`save_recipe` · `list_recipes` · `log_measurements`
 
 Правила поведения живут в докстрингах инструментов и в `INSTRUCTIONS` в `server.py` плюс `rules.md`.
 

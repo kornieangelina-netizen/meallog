@@ -37,9 +37,9 @@
   <section id="tab-journal" class="tab active">
     <div class="card hero" id="hero"></div>
     <p class="pace" id="pace"></p>
-    <ul class="list" id="meals"></ul>
-    <p class="empty" id="meals-empty" hidden>Записей пока нет. Отправь фото еды Claude или добавь вручную.</p>
-    <button class="fab" id="add-meal" aria-label="Добавить приём">+</button>
+    <div id="fits"></div>
+    <p class="empty" id="meals-empty" hidden>Записей пока нет. Отправь фото еды Claude или нажми «+» у любого приёма.</p>
+    <div id="meals"></div>
   </section>
 
   <!-- План -->
@@ -69,12 +69,6 @@
         <button data-period="90">3 месяца</button>
         <button data-period="all">Всё</button>
       </div>
-      <div class="chips" id="nutrient">
-        <button data-m="kcal" class="on"><i class="dot kcal"></i>Калории</button>
-        <button data-m="protein"><i class="dot protein"></i>Белки</button>
-        <button data-m="fat"><i class="dot fat"></i>Жиры</button>
-        <button data-m="carbs"><i class="dot carbs"></i>Углеводы</button>
-      </div>
     </div>
     <div id="analytics"></div>
   </section>
@@ -94,6 +88,17 @@
       <label>Сегодня, кг <input type="number" name="kg" step="0.1" inputmode="decimal"></label>
       <button type="submit" class="btn">Записать</button>
       <p class="muted" id="weight-last"></p>
+    </form>
+    <form id="measure-form" class="form card">
+      <h3>Объёмы <small>раз в 2 недели</small></h3>
+      <div class="row2">
+        <label>ОГ, см <input type="number" name="chest" step="0.1" inputmode="decimal" placeholder="грудь"></label>
+        <label>ОТ, см <input type="number" name="waist" step="0.1" inputmode="decimal" placeholder="талия"></label>
+        <label>ОБ, см <input type="number" name="hips" step="0.1" inputmode="decimal" placeholder="бёдра"></label>
+      </div>
+      <label>Дата замера <input type="date" name="date"></label>
+      <button type="submit" class="btn">Записать</button>
+      <div id="measure-info"></div>
     </form>
   </section>
 </main>
@@ -117,7 +122,6 @@
     <div id="modal-body"></div>
   </div>
 </div>
-<div class="tip" id="tip" hidden></div>
 
 <script src="/app.js"></script>
 </body>

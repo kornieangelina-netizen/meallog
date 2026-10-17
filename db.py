@@ -24,6 +24,21 @@ SLOT_TITLES = {
     "dinner": "Ужин",
 }
 MACROS = ("kcal", "protein", "fat", "carbs")
+# Diary entries are grouped into meals of the day. Any number of snacks is fine: "snack" is generic.
+MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snack"]
+MEAL_SLOT_TITLES = {"breakfast": "Завтрак", "lunch": "Обед", "dinner": "Ужин", "snack": "Перекус"}
+_NAME_TO_SLOT = {"завтрак": "breakfast", "обед": "lunch", "ужин": "dinner", "перекус": "snack",
+                 "перекус 1": "snack", "перекус 2": "snack", "перекус/другое": "snack"}
+
+
+def slot_for_hour(hour: int) -> str:
+    if hour < 11:
+        return "breakfast"
+    if hour < 15:
+        return "lunch"
+    if 17 <= hour < 22:
+        return "dinner"
+    return "snack"
 
 
 def now_local() -> datetime:
@@ -106,6 +121,37 @@ CREATE TABLE IF NOT EXISTS weight_log (
     date TEXT PRIMARY KEY,
     kg REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS measurements (
+    date TEXT PRIMARY KEY,
+    chest REAL,
+    waist REAL,
+    hips REAL
+);
+
+CREATE TABLE IF NOT EXISTS recipes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    product_id INTEGER,
+    raw_grams REAL NOT NULL DEFAULT 0,
+    cooked_grams REAL NOT NULL DEFAULT 0,
+    portion_grams REAL,
+    note TEXT DEFAULT '',
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS recipe_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipe_id INTEGER NOT NULL,
+    product_id INTEGER,
+    name TEXT NOT NULL,
+    grams REAL NOT NULL DEFAULT 0,
+    kcal REAL NOT NULL DEFAULT 0,
+    protein REAL NOT NULL DEFAULT 0,
+    fat REAL NOT NULL DEFAULT 0,
+    carbs REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_recipe_items ON recipe_items(recipe_id);
 """
 
 # Columns added after the first release go here: (table, column, DDL type+default).
@@ -115,6 +161,8 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("products", "lactose", "INTEGER NOT NULL DEFAULT 0"),
     ("products", "sugar", "INTEGER NOT NULL DEFAULT 0"),
     ("recommendations", "note", "TEXT DEFAULT ''"),
+    ("meals", "slot", "TEXT"),
+    ("products", "recipe_id", "INTEGER"),
 ]
 
 
@@ -147,6 +195,15 @@ def init_db() -> None:
             cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        # backfill meal slots: by the entry name when it is a meal title (imported history), else by hour
+        for r in conn.execute("SELECT id, name, logged_at FROM meals WHERE slot IS NULL").fetchall():
+            slot = _NAME_TO_SLOT.get(norm_key(r["name"]))
+            if not slot:
+                try:
+                    slot = slot_for_hour(datetime.fromisoformat(r["logged_at"]).hour)
+                except ValueError:
+                    slot = "snack"
+            conn.execute("UPDATE meals SET slot=? WHERE id=?", (slot, r["id"]))
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -330,19 +387,48 @@ def log_meal(
     product_id: int | None = None,
     portions: float | None = None,
     fridge_delta: float = 0,
+    slot: str | None = None,
 ) -> dict:
     dt = _parse_when(when)
+    if slot not in MEAL_SLOTS:
+        slot = _NAME_TO_SLOT.get(norm_key(name)) or slot_for_hour(dt.hour)
     cur = conn.execute(
         """INSERT INTO meals (logged_at, meal_date, name, description, grams, kcal, protein, fat, carbs,
-           product_id, portions, fridge_delta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+           product_id, portions, fridge_delta, slot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (dt.isoformat(timespec="seconds"), dt.date().isoformat(), name.strip(), description or "",
-         grams, kcal, protein, fat, carbs, product_id, portions, fridge_delta),
+         grams, kcal, protein, fat, carbs, product_id, portions, fridge_delta, slot),
     )
     return get_meal(conn, cur.lastrowid)
 
 
+def update_meal(conn, meal_id: int, **fields) -> dict | None:
+    """Edit a diary entry. Accepts name, description, grams, kcal, protein, fat, carbs, when, slot.
+
+    Macros are stored as given (absolute for the eaten amount); the caller rescales them if it wants
+    "same food, different weight". The fridge is not touched: a correction is not a second meal.
+    """
+    m = get_meal(conn, meal_id)
+    if not m:
+        return None
+    sets, vals = [], []
+    for k in ("name", "description", "grams", "kcal", "protein", "fat", "carbs"):
+        if k in fields and fields[k] is not None:
+            sets.append(f"{k}=?")
+            vals.append(fields[k].strip() if isinstance(fields[k], str) else fields[k])
+    if fields.get("slot") in MEAL_SLOTS:
+        sets.append("slot=?")
+        vals.append(fields["slot"])
+    if fields.get("when"):
+        dt = _parse_when(fields["when"])
+        sets += ["logged_at=?", "meal_date=?"]
+        vals += [dt.isoformat(timespec="seconds"), dt.date().isoformat()]
+    if sets:
+        conn.execute(f"UPDATE meals SET {', '.join(sets)} WHERE id=?", (*vals, meal_id))
+    return get_meal(conn, meal_id)
+
+
 def log_product(conn, product_id: int, portions: float | None = None, grams: float | None = None,
-                when: str | None = None, note: str = "") -> dict:
+                when: str | None = None, note: str = "", slot: str | None = None) -> dict:
     """Log a catalogue product: recalc macros, write diary, deduct from fridge."""
     p = get_product(conn, product_id)
     if not p:
@@ -356,7 +442,7 @@ def log_product(conn, product_id: int, portions: float | None = None, grams: flo
     desc = note or (f"{vals['portions']:g} порц." if p["basis"] == "portion" and vals["portions"] != 1 else "")
     return log_meal(conn, p["name"], vals["kcal"], vals["protein"], vals["fat"], vals["carbs"],
                     grams=vals["grams"], description=desc, when=when, product_id=product_id,
-                    portions=vals["portions"], fridge_delta=deduct)
+                    portions=vals["portions"], fridge_delta=deduct, slot=slot)
 
 
 def get_meal(conn, meal_id: int) -> dict | None:
@@ -366,6 +452,17 @@ def get_meal(conn, meal_id: int) -> dict | None:
 def list_meals(conn, day: str | None = None) -> list[dict]:
     day = day or today()
     return _rows(conn.execute("SELECT * FROM meals WHERE meal_date=? ORDER BY logged_at", (day,)))
+
+
+def recent_meals(conn, days: int = 21, limit: int = 40) -> list[dict]:
+    """Distinct dishes eaten lately (by name + description), newest first, for the "repeat" picker."""
+    since = (now_local().date() - timedelta(days=days)).isoformat()
+    rows = _rows(conn.execute(
+        """SELECT name, description, product_id, MAX(grams) grams, MAX(kcal) kcal, MAX(protein) protein, MAX(fat) fat,
+                  MAX(carbs) carbs, MAX(logged_at) last, COUNT(*) n
+           FROM meals WHERE meal_date >= ? GROUP BY name, COALESCE(description, '') ORDER BY last DESC LIMIT ?""",
+        (since, limit)))
+    return rows
 
 
 def delete_meal(conn, meal_id: int) -> bool:
@@ -429,6 +526,128 @@ def list_weight(conn, days: int = 90) -> list[dict]:
 
 def weight_today(conn) -> dict | None:
     return _row(conn.execute("SELECT * FROM weight_log WHERE date=?", (today(),)).fetchone())
+
+
+def log_measurements(conn, chest: float | None = None, waist: float | None = None,
+                     hips: float | None = None, day: str | None = None) -> dict:
+    """Body measurements in cm (ОГ chest, ОТ waist, ОБ hips); omitted values keep what the date already has."""
+    day = day or today()
+    cur = _row(conn.execute("SELECT * FROM measurements WHERE date=?", (day,)).fetchone()) or {}
+    row = {"date": day, "chest": chest if chest is not None else cur.get("chest"),
+           "waist": waist if waist is not None else cur.get("waist"),
+           "hips": hips if hips is not None else cur.get("hips")}
+    conn.execute("INSERT INTO measurements (date, chest, waist, hips) VALUES (?,?,?,?) ON CONFLICT(date) DO UPDATE SET "
+                 "chest=excluded.chest, waist=excluded.waist, hips=excluded.hips",
+                 (day, row["chest"], row["waist"], row["hips"]))
+    return row
+
+
+def list_measurements(conn, days: int | None = 365) -> list[dict]:
+    if days is None:
+        return _rows(conn.execute("SELECT * FROM measurements ORDER BY date"))
+    since = (now_local().date() - timedelta(days=days)).isoformat()
+    return _rows(conn.execute("SELECT * FROM measurements WHERE date >= ? ORDER BY date", (since,)))
+
+
+# --------------------------------------------------------------------------- #
+# recipes: a dish cooked from ingredients, stored as a per-100-g product of the COOKED dish
+# --------------------------------------------------------------------------- #
+
+def _recipe_item_macros(conn, item: dict) -> dict:
+    """Absolute macros of one ingredient line. A line with product_id and grams is computed from the
+    catalogue; a manual line carries its own absolute kcal/protein/fat/carbs for its grams."""
+    grams = float(item.get("grams") or 0)
+    pid = item.get("product_id")
+    if pid and not all(item.get(m) is not None for m in MACROS):
+        p = get_product(conn, int(pid))
+        if not p:
+            raise ValueError(f"product {pid} not found")
+        vals = macros_for(p, grams=grams) if grams else macros_for(p, portions=float(item.get("portions") or 1))
+        return {"product_id": p["id"], "name": item.get("name") or p["name"], "grams": vals["grams"] or grams,
+                **{m: vals[m] for m in MACROS}}
+    return {"product_id": pid, "name": (item.get("name") or "").strip() or "Ингредиент", "grams": grams,
+            **{m: round(float(item.get(m) or 0), 1) for m in MACROS}}
+
+
+def save_recipe(conn, name: str, items: list[dict], cooked_grams: float | None = None,
+                recipe_id: int | None = None, portion_grams: float | None = None, note: str = "",
+                to_fridge: bool = False, deduct: bool = False) -> dict:
+    """Create or update a recipe and its catalogue product (basis '100g' of the cooked dish).
+
+    items: [{product_id?, name?, grams, kcal?, protein?, fat?, carbs?}] — absolute values per line.
+    cooked_grams: weight after cooking (default: sum of raw grams). The product's per-100-g values are
+    totals / cooked_grams, so logging N g of the dish is exact. to_fridge adds cooked_grams of the dish
+    to the fridge; deduct removes the catalogue ingredients from the fridge (cooking consumes them).
+    """
+    lines = [_recipe_item_macros(conn, it) for it in items if it]
+    raw = round(sum(l["grams"] for l in lines), 1)
+    cooked = float(cooked_grams or raw or 0)
+    if cooked <= 0:
+        raise ValueError("нужен вес готового блюда")
+    totals = {m: round(sum(l[m] for l in lines), 1) for m in MACROS}
+    per100 = {m: round(totals[m] * 100 / cooked, 1) for m in MACROS}
+    name = name.strip()
+    now = now_local().isoformat(timespec="seconds")
+    old = get_recipe(conn, recipe_id) if recipe_id else None
+    if old:
+        conn.execute("UPDATE recipes SET name=?, raw_grams=?, cooked_grams=?, portion_grams=?, note=?, updated_at=? WHERE id=?",
+                     (name, raw, cooked, portion_grams, note, now, recipe_id))
+        conn.execute("DELETE FROM recipe_items WHERE recipe_id=?", (recipe_id,))
+        if old["product_id"] and old["name"] != name:
+            conn.execute("UPDATE products SET name=?, name_key=? WHERE id=?", (name, norm_key(name), old["product_id"]))
+    else:
+        cur = conn.execute("INSERT INTO recipes (name, raw_grams, cooked_grams, portion_grams, note, updated_at) VALUES (?,?,?,?,?,?)",
+                           (name, raw, cooked, portion_grams, note, now))
+        recipe_id = cur.lastrowid
+    for l in lines:
+        conn.execute("INSERT INTO recipe_items (recipe_id, product_id, name, grams, kcal, protein, fat, carbs) VALUES (?,?,?,?,?,?,?,?)",
+                     (recipe_id, l["product_id"], l["name"], l["grams"], l["kcal"], l["protein"], l["fat"], l["carbs"]))
+    p = save_product(conn, name, basis="100g", kcal=per100["kcal"], protein=per100["protein"], fat=per100["fat"],
+                     carbs=per100["carbs"], grams=portion_grams, category="рецепт",
+                     fridge_add=cooked if to_fridge else 0)
+    conn.execute("UPDATE products SET recipe_id=? WHERE id=?", (recipe_id, p["id"]))
+    conn.execute("UPDATE recipes SET product_id=? WHERE id=?", (p["id"], recipe_id))
+    if deduct:
+        for l in lines:
+            if not l["product_id"]:
+                continue
+            ing = get_product(conn, l["product_id"])
+            if not ing or ing["id"] == p["id"]:
+                continue
+            qty = l["grams"] if ing["basis"] == "100g" else (l["grams"] / ing["grams"] if ing["grams"] else 0)
+            if qty:
+                adjust_fridge(conn, ing["id"], -min(qty, float(ing["fridge_qty"])))
+    return get_recipe(conn, recipe_id)
+
+
+def get_recipe(conn, recipe_id: int) -> dict | None:
+    r = _row(conn.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone())
+    if not r:
+        return None
+    r["items"] = _rows(conn.execute("SELECT * FROM recipe_items WHERE recipe_id=? ORDER BY id", (recipe_id,)))
+    r["totals"] = {m: round(sum(i[m] for i in r["items"]), 1) for m in MACROS}
+    r["per100"] = {m: (round(r["totals"][m] * 100 / r["cooked_grams"], 1) if r["cooked_grams"] else 0) for m in MACROS}
+    p = get_product(conn, r["product_id"]) if r["product_id"] else None
+    r["fridge_qty"] = p["fridge_qty"] if p else 0
+    return r
+
+
+def list_recipes(conn) -> list[dict]:
+    out = []
+    for r in conn.execute("SELECT id FROM recipes ORDER BY updated_at DESC, id DESC"):
+        out.append(get_recipe(conn, r["id"]))
+    return out
+
+
+def delete_recipe(conn, recipe_id: int) -> bool:
+    r = get_recipe(conn, recipe_id)
+    if not r:
+        return False
+    conn.execute("DELETE FROM recipe_items WHERE recipe_id=?", (recipe_id,))
+    conn.execute("DELETE FROM recipes WHERE id=?", (recipe_id,))
+    if r["product_id"]:
+        conn.execute("UPDATE products SET recipe_id=NULL WHERE id=?", (r["product_id"],))
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -578,6 +797,7 @@ def analytics(conn, days: int | None = 30, start: str | None = None, end: str | 
                  'Перекус 1', 'Перекус 2', 'Перекус/Другое')
            GROUP BY name ORDER BY n DESC, kcal DESC LIMIT 10""", (s, e)))
     weight = _rows(conn.execute("SELECT * FROM weight_log WHERE date BETWEEN ? AND ? ORDER BY date", (s, e)))
+    measurements = _rows(conn.execute("SELECT * FROM measurements WHERE date BETWEEN ? AND ? ORDER BY date", (s, e)))
     return {"start": s, "end": e, "days": len(series), "series": series, "avg": avg, "logged_days": len(logged),
             "weekday": weekday, "hours": hours, "streak": streak, "top": top, "weight": weight,
-            "goals": get_goals(conn), "first_date": first_meal_date(conn)}
+            "measurements": measurements, "goals": get_goals(conn), "first_date": first_meal_date(conn)}

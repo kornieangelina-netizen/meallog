@@ -1,5 +1,5 @@
 // Bump CACHE on every change to app.js / styles.css / index.html: the app reloads itself on next open.
-const CACHE = 'meallog-v2';
+const CACHE = 'meallog-v3';
 const ASSETS = ['/', '/app.js', '/styles.css', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (e) => {

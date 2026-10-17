@@ -51,6 +51,10 @@ INSTRUCTIONS = f"""Ты ведёшь личный дневник питания 
 4. Значения в log_meal всегда на съеденную порцию целиком, не на 100 г.
 5. После записи ответь одной строкой: что записано, ккал и Б/Ж/У, и сколько осталось до цели за день.
 6. Если пользователь ел не сейчас, передай when в формате ISO (например 2026-10-16T09:30).
+7. Приём пищи (slot): breakfast | lunch | dinner | snack. Если пользователь сказал «на завтрак», «на ужин»,
+   передай slot; иначе он определится по времени. Перекусов в день может быть сколько угодно.
+8. Рецепт («приготовила ...», «сварила ... из ...») сохраняй через save_recipe: ингредиенты с граммами и
+   вес готового блюда. Это создаёт позицию справочника «на 100 г готового», из неё потом логируют граммы.
 {USER_RULES}"""
 
 mcp = MCPServer("MealLog", instructions=INSTRUCTIONS)
@@ -67,7 +71,7 @@ def _public_product(p: dict) -> dict:
 
 
 def _public_meal(m: dict) -> dict:
-    keys = ("id", "logged_at", "meal_date", "name", "description", "grams", "kcal", "protein", "fat", "carbs")
+    keys = ("id", "logged_at", "meal_date", "slot", "name", "description", "grams", "kcal", "protein", "fat", "carbs")
     return {k: m.get(k) for k in keys}
 
 
@@ -86,29 +90,32 @@ def find_products(query: str) -> dict:
 
 @mcp.tool()
 def log_product(product_id: int, portions: float | None = None, grams: float | None = None,
-                when: str | None = None) -> dict:
+                when: str | None = None, slot: str | None = None) -> dict:
     """Записать приём пищи из справочника и списать его из холодильника.
 
     Передай либо portions (число порций), либо grams (граммы). КБЖУ пересчитаются по basis продукта.
-    when: ISO дата-время, если ели не сейчас (например '2026-10-16T13:00'). Возвращает запись и итоги дня.
+    when: ISO дата-время, если ели не сейчас (например '2026-10-16T13:00').
+    slot: breakfast | lunch | dinner | snack (необязательно, иначе по времени). Возвращает запись и итоги дня.
     """
     with db.tx() as conn:
-        meal = db.log_product(conn, product_id, portions=portions, grams=grams, when=when)
+        meal = db.log_product(conn, product_id, portions=portions, grams=grams, when=when, slot=slot)
         summary = db.day_summary(conn, meal["meal_date"])
     return {"meal": _public_meal(meal), "day_totals": summary["totals"], "left_to_goal": summary["left"]}
 
 
 @mcp.tool()
 def log_meal(name: str, kcal: float, protein: float, fat: float, carbs: float,
-             grams: float | None = None, description: str = "", when: str | None = None) -> dict:
+             grams: float | None = None, description: str = "", when: str | None = None,
+             slot: str | None = None) -> dict:
     """Записать приём пищи «с нуля», когда позиции нет в справочнике (КБЖУ оценены по фото или тексту).
 
     Все значения НА СЪЕДЕННУЮ ПОРЦИЮ ЦЕЛИКОМ, не на 100 г. grams: примерный вес порции.
     description: состав блюда подробно (что именно и сколько). when: ISO дата-время, если ели не сейчас.
-    Возвращает запись и итоги дня.
+    slot: breakfast | lunch | dinner | snack (необязательно, иначе по времени). Возвращает запись и итоги дня.
     """
     with db.tx() as conn:
-        meal = db.log_meal(conn, name, kcal, protein, fat, carbs, grams=grams, description=description, when=when)
+        meal = db.log_meal(conn, name, kcal, protein, fat, carbs, grams=grams, description=description, when=when,
+                           slot=slot)
         summary = db.day_summary(conn, meal["meal_date"])
     return {"meal": _public_meal(meal), "day_totals": summary["totals"], "left_to_goal": summary["left"]}
 
@@ -155,6 +162,54 @@ def list_meals(day: str | None = None) -> dict:
     with db.tx() as conn:
         meals = db.list_meals(conn, day)
     return {"count": len(meals), "meals": [_public_meal(m) for m in meals]}
+
+
+@mcp.tool()
+def update_meal(meal_id: int, name: str | None = None, grams: float | None = None, kcal: float | None = None,
+                protein: float | None = None, fat: float | None = None, carbs: float | None = None,
+                description: str | None = None, when: str | None = None, slot: str | None = None) -> dict:
+    """Исправить запись дневника по id: название, вес, КБЖУ (абсолютные на порцию), состав, время, приём (slot).
+
+    Передавай только то, что меняется. Холодильник не трогается.
+    """
+    with db.tx() as conn:
+        m = db.update_meal(conn, meal_id, name=name, grams=grams, kcal=kcal, protein=protein, fat=fat, carbs=carbs,
+                           description=description, when=when, slot=slot)
+    return {"meal": _public_meal(m) if m else None}
+
+
+@mcp.tool()
+def save_recipe(name: str, items: list[dict], cooked_grams: float, portion_grams: float | None = None,
+                to_fridge: bool = False, deduct: bool = False, recipe_id: int | None = None) -> dict:
+    """Сохранить рецепт (блюдо из ингредиентов) и создать позицию справочника «на 100 г ГОТОВОГО блюда».
+
+    items: список ингредиентов. Каждый: либо {"product_id": id, "grams": г} (из справочника),
+    либо {"name": ..., "grams": г, "kcal": .., "protein": .., "fat": .., "carbs": ..} с КБЖУ НА ЭТИ ГРАММЫ.
+    cooked_grams: вес готового блюда после готовки (обязательно). portion_grams: обычная порция, г.
+    to_fridge: положить готовое блюдо в холодильник (cooked_grams г). deduct: списать ингредиенты из холодильника.
+    Потом съеденное логируется через log_product(product_id, grams=...).
+    """
+    with db.tx() as conn:
+        r = db.save_recipe(conn, name, items, cooked_grams=cooked_grams, recipe_id=recipe_id,
+                           portion_grams=portion_grams, to_fridge=to_fridge, deduct=deduct)
+    return {"recipe": r}
+
+
+@mcp.tool()
+def list_recipes() -> dict:
+    """Сохранённые рецепты с ингредиентами, итогами и КБЖУ на 100 г готового блюда."""
+    with db.tx() as conn:
+        rs = db.list_recipes(conn)
+    return {"count": len(rs), "recipes": rs}
+
+
+@mcp.tool()
+def log_measurements(chest: float | None = None, waist: float | None = None, hips: float | None = None,
+                     day: str | None = None) -> dict:
+    """Записать объёмы в см: chest = ОГ (грудь), waist = ОТ (талия), hips = ОБ (бёдра). day: 'YYYY-MM-DD'."""
+    with db.tx() as conn:
+        m = db.log_measurements(conn, chest=chest, waist=waist, hips=hips, day=day)
+    return {"measurements": m}
 
 
 @mcp.tool()
@@ -326,21 +381,61 @@ def api_day(request, conn, body):
     return db.day_summary(conn, request.query_params.get("date"))
 
 
+@api("/api/meals/recent", ["GET"])
+def api_recent_meals(request, conn, body):
+    return {"meals": db.recent_meals(conn)}
+
+
 @api("/api/meals", ["POST"])
 def api_add_meal(request, conn, body):
     if body.get("product_id"):
         m = db.log_product(conn, int(body["product_id"]), portions=_num(body.get("portions")),
-                           grams=_num(body.get("grams")), when=body.get("when"))
+                           grams=_num(body.get("grams")), when=body.get("when"), slot=body.get("slot"))
     else:
         m = db.log_meal(conn, body["name"], _num(body.get("kcal"), 0), _num(body.get("protein"), 0),
                         _num(body.get("fat"), 0), _num(body.get("carbs"), 0), grams=_num(body.get("grams")),
-                        description=body.get("description", ""), when=body.get("when"))
+                        description=body.get("description", ""), when=body.get("when"), slot=body.get("slot"))
     return {"meal": m, "day": db.day_summary(conn, m["meal_date"])}
 
 
 @api("/api/meals/{meal_id:int}", ["DELETE"])
 def api_delete_meal(request, conn, body):
     return {"deleted": db.delete_meal(conn, request.path_params["meal_id"])}
+
+
+@api("/api/meals/{meal_id:int}", ["PUT"])
+def api_update_meal(request, conn, body):
+    m = db.update_meal(conn, request.path_params["meal_id"], name=body.get("name"), description=body.get("description"),
+                       grams=_num(body.get("grams")), kcal=_num(body.get("kcal")), protein=_num(body.get("protein")),
+                       fat=_num(body.get("fat")), carbs=_num(body.get("carbs")), when=body.get("when"),
+                       slot=body.get("slot"))
+    if m is None:
+        raise ValueError("meal not found")
+    return {"meal": m, "day": db.day_summary(conn, m["meal_date"])}
+
+
+@api("/api/recipes", ["GET"])
+def api_recipes(request, conn, body):
+    return {"recipes": db.list_recipes(conn)}
+
+
+@api("/api/recipes", ["POST"])
+def api_save_recipe(request, conn, body):
+    r = db.save_recipe(conn, body["name"], body.get("items") or [], cooked_grams=_num(body.get("cooked_grams")),
+                       recipe_id=body.get("id"), portion_grams=_num(body.get("portion_grams")),
+                       note=body.get("note", ""), to_fridge=bool(body.get("to_fridge")), deduct=bool(body.get("deduct")))
+    return {"recipe": r}
+
+
+@api("/api/recipes/{rid:int}", ["DELETE"])
+def api_delete_recipe(request, conn, body):
+    return {"deleted": db.delete_recipe(conn, request.path_params["rid"])}
+
+
+@api("/api/measurements", ["POST"])
+def api_measurements(request, conn, body):
+    return {"measurements": db.log_measurements(conn, chest=_num(body.get("chest")), waist=_num(body.get("waist")),
+                                                hips=_num(body.get("hips")), day=body.get("date"))}
 
 
 @api("/api/products", ["GET"])
@@ -422,7 +517,8 @@ async def api_regenerate(request: Request) -> Response:
 
 @api("/api/goals", ["GET"])
 def api_goals(request, conn, body):
-    return {"goals": db.get_goals(conn), "weight_today": db.weight_today(conn), "weight": db.list_weight(conn, 90)}
+    return {"goals": db.get_goals(conn), "weight_today": db.weight_today(conn), "weight": db.list_weight(conn, 90),
+            "measurements": db.list_measurements(conn, None), "today": db.today()}
 
 
 @api("/api/goals", ["PUT"])
