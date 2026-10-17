@@ -418,7 +418,11 @@
         const r = await api('/api/recs/regenerate', { method: 'POST', body: { date: state.date, wish: e.target.wish.value } });
         $('#rec-comment').textContent = r.comment || '';
         closeModal(); loadRecs();
-      } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = 'Собрать план'; }
+      } catch (err) {
+        btn.disabled = false; btn.textContent = 'Собрать план';
+        let p = el.querySelector('.error'); if (!p) { p = document.createElement('p'); p.className = 'error'; e.target.appendChild(p); }
+        p.textContent = err.message;
+      }
     });
   }));
 

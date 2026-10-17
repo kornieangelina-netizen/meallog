@@ -413,6 +413,9 @@ async def api_regenerate(request: Request) -> Response:
         result = await asyncio.to_thread(generate_plan, day, body.get("wish", ""))
     except RuntimeError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:  # never hand the PWA a bare 500: it shows this text
+        log.exception("plan generation failed")
+        return JSONResponse({"error": f"не удалось собрать план: {e}"}, status_code=500)
     with db.tx() as conn:
         return JSONResponse({"plan": db.list_recommendations(conn, day), "comment": result.get("comment", "")})
 

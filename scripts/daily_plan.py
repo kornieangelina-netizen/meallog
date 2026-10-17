@@ -61,6 +61,13 @@ def _fridge_for_prompt(conn) -> list[dict]:
             for p in items]
 
 
+def _macros(p: dict, portions: float) -> dict:
+    """Macros for `portions` of a fridge item; a 100 g item without a portion weight counts 100 g per portion."""
+    if p["basis"] == "portion":
+        return db.macros_for(p, portions=portions)
+    return db.macros_for(p, grams=portions * (p.get("grams") or 100))
+
+
 def validate(items: list[dict], fridge: dict[int, dict], goals: dict) -> tuple[list[str], dict]:
     """Return (problems, totals). Empty problems means the plan is acceptable."""
     problems: list[str] = []
@@ -80,7 +87,7 @@ def validate(items: list[dict], fridge: dict[int, dict], goals: dict) -> tuple[l
             continue
         if p["basis"] == "portion" and abs(portions - round(portions)) > 1e-6:
             problems.append(f"{p['name']}: штучная позиция, portions должно быть целым")
-        vals = db.macros_for(p, portions=portions)
+        vals = _macros(p, portions)
         qty_used = portions if p["basis"] == "portion" else (vals["grams"] or 0)
         used[pid] = used.get(pid, 0) + qty_used
         count[pid] = count.get(pid, 0) + 1
@@ -114,7 +121,7 @@ def greedy_fill(items: list[dict], fridge: dict[int, dict], goals: dict) -> list
     remaining = {pid: p["fridge_qty"] for pid, p in fridge.items()}
     for it in items:
         p = fridge[it["product_id"]]
-        q = it["portions"] if p["basis"] == "portion" else db.macros_for(p, portions=it["portions"])["grams"]
+        q = it["portions"] if p["basis"] == "portion" else _macros(p, it["portions"])["grams"]
         remaining[it["product_id"]] -= q or 0
     order = sorted(fridge.values(), key=lambda p: -(p["protein"] / max(p["kcal"], 1)))
     slots = [s for s in ("breakfast", "lunch", "dinner", "snack1", "snack2")
@@ -127,7 +134,7 @@ def greedy_fill(items: list[dict], fridge: dict[int, dict], goals: dict) -> list
             if remaining[p["id"]] < step or step <= 0:
                 continue
             portions = 1 if p["basis"] == "portion" else step / (p["grams"] or 100)
-            vals = db.macros_for(p, portions=portions)
+            vals = _macros(p, portions)
             if totals["kcal"] + vals["kcal"] > goals["kcal"] * (1 + KCAL_TOLERANCE):
                 continue
             items.append({"slot": slots[si % len(slots)], "product_id": p["id"], "portions": portions})
@@ -181,11 +188,12 @@ def generate_plan(day: str | None = None, wish: str = "", rounds: int = MAX_ROUN
     if os.environ.get("ANTHROPIC_API_KEY"):
         items, comment = ask_claude(fridge_list, goals, wish, rounds)
     else:
-        items, comment = [], "ANTHROPIC_API_KEY не задан, план собран без модели"
+        items, comment = [], "План собран автоматически из холодильника (без Claude)."
     problems, _ = validate(items, fridge, goals)
     if problems:
         items = greedy_fill(items, fridge, goals)
-        comment = (comment + " " if comment else "") + "(план добит автоматически)"
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            comment = (comment + " " if comment else "") + "(план добит автоматически)"
     with db.tx() as conn:
         db.clear_recommendations(conn, day, keep_done=True)
         for it in items:

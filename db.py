@@ -294,12 +294,10 @@ def macros_for(product: dict, portions: float | None = None, grams: float | None
         if grams is None:
             if portions is None:
                 portions = 1.0
-            if not pg:
-                raise ValueError("product has no portion weight; pass grams")
-            grams = portions * pg
+            grams = portions * (pg or 100)  # no portion weight: one portion = 100 g
         factor = grams / 100.0
         total_grams = grams
-        portions = portions if portions is not None else (grams / pg if pg else None)
+        portions = portions if portions is not None else grams / (pg or 100)
     out = {m: round(float(product[m]) * factor, 1) for m in MACROS}
     out["grams"] = _r1(total_grams)
     out["portions"] = _r1(portions)
