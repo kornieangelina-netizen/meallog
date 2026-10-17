@@ -213,11 +213,26 @@ def log_measurements(chest: float | None = None, waist: float | None = None, hip
 
 
 @mcp.tool()
-def import_meals(rows: list[dict], clear_imported: bool = False) -> dict:
+def import_meals(rows: list[dict] | None = None, csv_text: str | None = None, clear_imported: bool = False) -> dict:
     """Массовый импорт истории дневника, по одной записи на блюдо. rows: [{date, meal, food, amount, kcal,
-    protein, fat, carbs}]. clear_imported=True сначала удаляет все ранее импортированные записи."""
+    protein, fat, carbs}] или csv_text: CSV с заголовком date,meal,food,amount,kcal,fat,carbs,protein.
+    clear_imported=True сначала удаляет все ранее импортированные записи. Возвращает число записей и
+    сумму ккал по месяцам для сверки."""
+    import csv
+    import io
+
+    data = list(rows or [])
+    if csv_text:
+        data += list(csv.DictReader(io.StringIO(csv_text.strip())))
     with db.tx() as conn:
-        return db.import_rows(conn, rows, clear_imported=clear_imported)
+        r = db.import_rows(conn, data, clear_imported=clear_imported)
+    by_month: dict[str, dict] = {}
+    for x in data:
+        m = by_month.setdefault(str(x["date"])[:7], {"rows": 0, "kcal": 0.0})
+        m["rows"] += 1
+        m["kcal"] += float(x.get("kcal") or 0)
+    r["months"] = {k: {"rows": v["rows"], "kcal": round(v["kcal"])} for k, v in sorted(by_month.items())}
+    return r
 
 
 @mcp.tool()
