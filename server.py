@@ -213,6 +213,14 @@ def log_measurements(chest: float | None = None, waist: float | None = None, hip
 
 
 @mcp.tool()
+def import_meals(rows: list[dict], clear_imported: bool = False) -> dict:
+    """Массовый импорт истории дневника, по одной записи на блюдо. rows: [{date, meal, food, amount, kcal,
+    protein, fat, carbs}]. clear_imported=True сначала удаляет все ранее импортированные записи."""
+    with db.tx() as conn:
+        return db.import_rows(conn, rows, clear_imported=clear_imported)
+
+
+@mcp.tool()
 def delete_meal(meal_id: int) -> dict:
     """Удалить ошибочную запись дневника по id (вернёт списанное в холодильник и снимет галочку в плане)."""
     with db.tx() as conn:

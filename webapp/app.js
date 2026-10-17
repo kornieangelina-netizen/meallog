@@ -13,6 +13,7 @@
   const UNIT = { kcal: 'ккал', protein: 'г', fat: 'г', carbs: 'г' };
   const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
   const MONTHS_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+  const SLOT_ORDER = ['breakfast', 'snack1', 'lunch', 'snack2', 'dinner']; // plan slots, in day order
   const WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
   const WEEKDAYS_LONG = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'];
   const css = getComputedStyle(document.documentElement);
@@ -587,7 +588,6 @@
     renderQuick();
     const box = $('#products');
     box.innerHTML = '';
-    if (!q) renderRecipes(box);
     const fridge = d.products.filter((p) => p.fridge_qty > 0);
     const rest = d.products.filter((p) => !(p.fridge_qty > 0) && !(p.recipe_id && !q)); // recipes have their own section
     if (fridge.length) {
@@ -595,6 +595,7 @@
       box.insertAdjacentHTML('beforeend', `<div class="cat">В холодильнике <small>· ${fridge.length} ${plural(fridge.length, 'позиция', 'позиции', 'позиций')}, ${fmt(tot)} ккал</small></div>`);
       fridge.forEach((p) => box.appendChild(productItem(p)));
     }
+    if (!q) renderRecipes(box);
     const cats = {};
     for (const p of rest) (cats[p.category || 'Прочее'] = cats[p.category || 'Прочее'] || []).push(p);
     for (const c of Object.keys(cats).sort()) {

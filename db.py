@@ -7,6 +7,7 @@ counter. Recommendations are the daily plan. Goals and weight_log are tiny.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -399,6 +400,38 @@ def log_meal(
          grams, kcal, protein, fat, carbs, product_id, portions, fridge_delta, slot),
     )
     return get_meal(conn, cur.lastrowid)
+
+
+IMPORT_TAG = "Из FatSecret"
+_IMPORT_TIMES = {"breakfast": 9, "lunch": 13, "snack": 16, "dinner": 19}
+
+
+def import_rows(conn, rows: list[dict], clear_imported: bool = False) -> dict:
+    """Bulk-load diary rows exported from another app, ONE entry per food (name, amount, macros).
+
+    Row keys: date, meal (Завтрак/Обед/Ужин/Перекус...), food, amount ('130 г', '1 кружка (240 мл)'),
+    kcal, protein, fat, carbs. Entries are tagged in `description` so a re-import can replace them.
+    clear_imported=True first deletes every previously imported entry (grouped or per-food)."""
+    deleted = 0
+    if clear_imported:
+        deleted = conn.execute("DELETE FROM meals WHERE description LIKE ? OR description LIKE ?",
+                               (IMPORT_TAG + ":%", "%· " + IMPORT_TAG)).rowcount
+    seq: dict[tuple[str, str], int] = {}
+    n = 0
+    for r in rows:
+        slot = _NAME_TO_SLOT.get(norm_key(str(r.get("meal", "")))) or "snack"
+        k = (r["date"], slot)
+        seq[k] = seq.get(k, 0) + 1
+        minute = min(59, seq[k] - 1)
+        amount = str(r.get("amount") or "").strip()
+        m = re.fullmatch(r"([\d.,]+)\s*(г|мл)", amount)
+        grams = float(m.group(1).replace(",", ".")) if m else None
+        desc = f"{amount} · {IMPORT_TAG}" if amount else IMPORT_TAG
+        log_meal(conn, str(r["food"]).strip(), float(r.get("kcal") or 0), float(r.get("protein") or 0),
+                 float(r.get("fat") or 0), float(r.get("carbs") or 0), grams=grams, description=desc,
+                 when=f"{r['date']}T{_IMPORT_TIMES[slot]:02d}:{minute:02d}", slot=slot)
+        n += 1
+    return {"imported": n, "deleted": deleted}
 
 
 def update_meal(conn, meal_id: int, **fields) -> dict | None:
