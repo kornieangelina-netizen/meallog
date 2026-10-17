@@ -301,7 +301,8 @@
     if (generic && (m.description || '').startsWith('Из FatSecret: ')) {
       return { title: m.description.slice('Из FatSecret: '.length), sub: timeOf(m.logged_at) };
     }
-    return { title: m.name, sub: [timeOf(m.logged_at), m.grams ? `${fmt(m.grams)} г` : '', m.description].filter(Boolean).join(' · ') };
+    const imported = (m.description || '').endsWith('Из FatSecret'); // description already carries the amount
+    return { title: m.name, sub: [timeOf(m.logged_at), m.grams && !imported ? `${fmt(m.grams)} г` : '', m.description].filter(Boolean).join(' · ') };
   }
 
   async function loadProductsCache(force = false) {
