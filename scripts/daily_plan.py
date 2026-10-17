@@ -123,7 +123,11 @@ def greedy_fill(items: list[dict], fridge: dict[int, dict], goals: dict) -> list
         p = fridge[it["product_id"]]
         q = it["portions"] if p["basis"] == "portion" else _macros(p, it["portions"])["grams"]
         remaining[it["product_id"]] -= q or 0
-    order = sorted(fridge.values(), key=lambda p: -(p["protein"] / max(p["kcal"], 1)))
+    # whole dishes first (by protein density), loose 100 g items last; nothing more than twice a day
+    order = sorted(fridge.values(), key=lambda p: (p["basis"] != "portion", -(p["protein"] / max(p["kcal"], 1))))
+    count = {it["product_id"]: 0 for it in items}
+    for it in items:
+        count[it["product_id"]] += 1
     slots = [s for s in ("breakfast", "lunch", "dinner", "snack1", "snack2")
              if s not in {it["slot"] for it in items}] or ["snack2"]
     si = 0
@@ -131,7 +135,7 @@ def greedy_fill(items: list[dict], fridge: dict[int, dict], goals: dict) -> list
         progressed = False
         for p in order:
             step = 1 if p["basis"] == "portion" else min(remaining[p["id"]], p["grams"] or 100)
-            if remaining[p["id"]] < step or step <= 0:
+            if remaining[p["id"]] < step or step <= 0 or count.get(p["id"], 0) >= 2:
                 continue
             portions = 1 if p["basis"] == "portion" else step / (p["grams"] or 100)
             vals = _macros(p, portions)
@@ -140,6 +144,7 @@ def greedy_fill(items: list[dict], fridge: dict[int, dict], goals: dict) -> list
             items.append({"slot": slots[si % len(slots)], "product_id": p["id"], "portions": portions})
             si += 1
             remaining[p["id"]] -= step
+            count[p["id"]] = count.get(p["id"], 0) + 1
             for m in db.MACROS:
                 totals[m] += vals[m]
             progressed = True
