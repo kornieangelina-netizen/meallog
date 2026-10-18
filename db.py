@@ -153,6 +153,18 @@ CREATE TABLE IF NOT EXISTS recipe_items (
     carbs REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_recipe_items ON recipe_items(recipe_id);
+
+CREATE TABLE IF NOT EXISTS push_subs (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # Columns added after the first release go here: (table, column, DDL type+default).
@@ -316,7 +328,10 @@ def set_product_flags(conn, product_id: int, urgent=None, lactose=None, sugar=No
 
 
 def list_products(conn) -> list[dict]:
-    return _rows(conn.execute("SELECT * FROM products ORDER BY category, name"))
+    """All products with last_eaten: the latest diary date this product was logged on (None if never)."""
+    return _rows(conn.execute(
+        "SELECT p.*, (SELECT MAX(m.meal_date) FROM meals m WHERE m.product_id = p.id) AS last_eaten "
+        "FROM products p ORDER BY p.category, p.name"))
 
 
 def list_fridge(conn) -> dict:
@@ -573,6 +588,27 @@ def log_measurements(conn, chest: float | None = None, waist: float | None = Non
                  "chest=excluded.chest, waist=excluded.waist, hips=excluded.hips",
                  (day, row["chest"], row["waist"], row["hips"]))
     return row
+
+
+MEASURE_EVERY = 14  # days between body measurements
+
+
+def measure_due(conn) -> str | None:
+    """Date the next measurements are due (last measurement + 14 days), None when there are none yet."""
+    last = conn.execute("SELECT MAX(date) FROM measurements").fetchone()[0]
+    if not last:
+        return None
+    return (date.fromisoformat(last) + timedelta(days=MEASURE_EVERY)).isoformat()
+
+
+def kv_get(conn, key: str) -> str | None:
+    r = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+    return r[0] if r else None
+
+
+def kv_set(conn, key: str, value: str) -> None:
+    conn.execute("INSERT INTO kv (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (key, value))
 
 
 def list_measurements(conn, days: int | None = 365) -> list[dict]:

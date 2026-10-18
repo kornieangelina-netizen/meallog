@@ -369,3 +369,12 @@ input[type=search] { margin-top: 12px; }
 .dtable td .dot { margin-right: 4px; }
 .dtable td:last-child { font-weight: 500; }
 .dtable td:nth-child(2) { font-weight: 600; }
+.prod-seg { margin: 0 0 10px; }
+.prod-seg small { opacity: .7; font-weight: 500; margin-left: 3px; }
+.push-card { padding: 14px; margin: 12px 0 14px; }
+.push-card h3 { margin-top: 0; }
+.push-card h3 small.ok { color: var(--kcal, #2bcf8e); font-weight: 600; }
+.push-card .btn { margin-top: 8px; width: 100%; }
+.push-card p { margin: 0 2px; }
+.back { border: 1px solid var(--line); background: var(--card-2); color: var(--muted); border-radius: 16px; padding: 5px 12px; font-size: 12.5px; white-space: nowrap; }
+.back:active { color: var(--text); border-color: var(--accent); }

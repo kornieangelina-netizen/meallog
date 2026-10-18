@@ -21,6 +21,7 @@
 
   const state = {
     tab: 'journal',
+    prodView: 'fridge',
     date: null,          // selected day, 'YYYY-MM-DD'
     today: null,         // local today, refreshed on wake
     serverToday: null,   // from /api/recs
@@ -581,6 +582,8 @@
   }));
 
   // ---------- products + recipes ----------
+  // Products tab: «В холодильнике» (what is at home now + recipes) and «Съедено» (finished or never stocked,
+  // newest eaten first). Nothing is deleted when it runs out: "+" on an eaten item puts it back in the fridge.
   async function loadProducts() {
     const q = $('#product-search').value.trim();
     const [d, rr] = await Promise.all([api(`/api/products${q ? `?q=${encodeURIComponent(q)}` : ''}`), q ? { recipes: null } : api('/api/recipes')]);
@@ -590,21 +593,51 @@
     const box = $('#products');
     box.innerHTML = '';
     const fridge = d.products.filter((p) => p.fridge_qty > 0);
-    const rest = d.products.filter((p) => !(p.fridge_qty > 0) && !(p.recipe_id && !q)); // recipes have their own section
-    if (fridge.length) {
-      const tot = fridge.reduce((a, p) => a + (p.basis === 'portion' ? p.kcal * p.fridge_qty : p.kcal * p.fridge_qty / 100), 0);
-      box.insertAdjacentHTML('beforeend', `<div class="cat">В холодильнике <small>· ${fridge.length} ${plural(fridge.length, 'позиция', 'позиции', 'позиций')}, ${fmt(tot)} ккал</small></div>`);
-      fridge.forEach((p) => box.appendChild(productItem(p)));
+    const eaten = d.products.filter((p) => !(p.fridge_qty > 0) && !(p.recipe_id && !q)); // recipes have their own section
+    const seg = $('#prod-seg');
+    seg.hidden = !!q;
+    seg.querySelector('[data-v=fridge] small').textContent = q ? '' : fridge.length;
+    seg.querySelector('[data-v=eaten] small').textContent = q ? '' : eaten.length;
+    seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.prodView));
+    if (q || state.prodView === 'fridge') {
+      if (fridge.length) {
+        const tot = fridge.reduce((a, p) => a + (p.basis === 'portion' ? p.kcal * p.fridge_qty : p.kcal * p.fridge_qty / 100), 0);
+        box.insertAdjacentHTML('beforeend', `<div class="cat">В холодильнике <small>· ${fridge.length} ${plural(fridge.length, 'позиция', 'позиции', 'позиций')}, ${fmt(tot)} ккал</small></div>`);
+        fridge.forEach((p) => box.appendChild(productItem(p)));
+      } else if (!q) {
+        box.insertAdjacentHTML('beforeend', '<p class="empty">Холодильник пуст. Всё съеденное лежит во вкладке «Съедено», оттуда можно вернуть продукт кнопкой «+».</p>');
+      }
+      if (!q) renderRecipes(box);
     }
-    if (!q) renderRecipes(box);
+    if (q) {
+      if (eaten.length) box.insertAdjacentHTML('beforeend', '<div class="cat">Съедено и справочник</div>');
+      eaten.forEach((p) => box.appendChild(productItem(p)));
+      if (!d.products.length) box.innerHTML = '<p class="empty">Ничего не нашлось.</p>';
+      return;
+    }
+    if (state.prodView !== 'eaten') return;
+    // eaten: grouped by the last day it was logged, newest first; never logged go last by category
+    const byDay = {};
+    const never = [];
+    for (const p of eaten) (p.last_eaten ? (byDay[p.last_eaten] = byDay[p.last_eaten] || []) : never).push(p);
+    const dayLabel = (dt) => (dt === state.today ? 'Сегодня' : dt === addDays(state.today, -1) ? 'Вчера' : shortDate(dt));
+    for (const dt of Object.keys(byDay).sort().reverse()) {
+      box.insertAdjacentHTML('beforeend', `<div class="cat">${dayLabel(dt)}</div>`);
+      byDay[dt].forEach((p) => box.appendChild(productItem(p)));
+    }
     const cats = {};
-    for (const p of rest) (cats[p.category || 'Прочее'] = cats[p.category || 'Прочее'] || []).push(p);
+    for (const p of never) (cats[p.category || 'Прочее'] = cats[p.category || 'Прочее'] || []).push(p);
     for (const c of Object.keys(cats).sort()) {
-      box.insertAdjacentHTML('beforeend', `<div class="cat">${esc(c)}</div>`);
+      box.insertAdjacentHTML('beforeend', `<div class="cat">${esc(c)} <small>· из справочника</small></div>`);
       cats[c].forEach((p) => box.appendChild(productItem(p)));
     }
-    if (!d.products.length && !(state.recipes || []).length) box.innerHTML = '<p class="empty">Справочник пуст. Попроси Claude сохранить продукты или добавь вручную.</p>';
+    if (!eaten.length) box.innerHTML = '<p class="empty">Здесь появится то, что закончилось в холодильнике.</p>';
   }
+  $$('#prod-seg button').forEach((b) => b.addEventListener('click', () => {
+    state.prodView = b.dataset.v;
+    try { localStorage.setItem('prodView', state.prodView); } catch (_) { /* private mode */ }
+    loadProducts();
+  }));
 
   function renderQuick() {
     const q = $('#quick');
@@ -629,7 +662,8 @@
         <div class="grow"><div class="name">${esc(p.name)}<span class="flags">${flags(p)}</span></div>
           <div class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${per}</div></div>
         <div class="side">
-          <div class="qty"><button data-d="-${step}">−</button><span>${qty(p.fridge_qty)} ${unit}</span><button data-d="${step}">+</button></div>
+          ${p.fridge_qty > 0 ? `<div class="qty"><button data-d="-${step}">−</button><span>${qty(p.fridge_qty)} ${unit}</span><button data-d="${step}">+</button></div>`
+            : `<button class="back" data-act="back">+ в холодильник</button>`}
           <button class="eat" data-act="eat">Съела</button>
         </div>
       </div>`;
@@ -639,6 +673,12 @@
       p.fridge_qty = r.product.fridge_qty;
       el.querySelector('.qty span').textContent = `${qty(p.fridge_qty)} ${unit}`;
     }));
+    const back = el.querySelector('[data-act=back]');
+    if (back) back.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await api(`/api/products/${p.id}/fridge`, { method: 'POST', body: { delta: step } });
+      toast(`«${p.name}» снова в холодильнике`); loadProducts();
+    });
     el.querySelector('[data-act=log]').addEventListener('click', () => quickLog(p));
     el.querySelector('[data-act=eat]').addEventListener('click', (e) => { e.stopPropagation(); quickLog(p); });
     el.querySelector('[data-act=urgent]').addEventListener('click', async () => {
@@ -1378,6 +1418,7 @@
     $('#weight-last').textContent = last ? `Последняя запись: ${fmt(last.kg, 1)} кг (${shortDate(last.date)})` : 'Веса ещё нет';
     if (g.weight_today) $('#weight-form').kg.value = g.weight_today.kg;
     renderMeasurements(g.measurements || []);
+    renderPush();
   }
 
   function renderMeasurements(ms) {
@@ -1419,25 +1460,33 @@
     toast('Объёмы записаны'); loadGoals();
   });
 
-  // one check-in sheet on wake: today's weight (every open until entered) and, every two weeks, the measurements (once a day)
-  async function checkIns() {
+  // check-in sheet on entering the app, from 10:00 only: today's weight if not entered yet, and the
+  // measurements when two weeks have passed. Each is asked at most once a day ("Позже" means tomorrow).
+  const CHECKIN_HOUR = 10;
+  const askedOn = (k) => { try { return localStorage.getItem(k) === state.today; } catch (_) { return false; } };
+  const markAsked = (k) => { try { localStorage.setItem(k, state.today); } catch (_) { /* private mode */ } };
+
+  async function checkIns(force) {
     if (state.weightAsked) return;
+    if (!force && new Date().getHours() < CHECKIN_HOUR) return;
     let g;
     try { g = await api('/api/goals'); } catch (_) { return; /* offline or unauthorized */ }
     const ms = g.measurements || [];
     const last = ms[ms.length - 1];
-    const measureDue = last ? daysBetween(last.date, state.today) >= MEASURE_EVERY : false;
-    let askedToday = false;
-    try { askedToday = localStorage.getItem('measureAsked') === state.today; } catch (_) { /* private mode */ }
-    const needWeight = !g.weight_today, needMeasure = measureDue && !askedToday;
+    const measureDue = !!g.measure_due && g.measure_due <= state.today;
+    const needWeight = !g.weight_today && !askedOn('weightAsked');
+    const needMeasure = measureDue && (force || !askedOn('measureAsked'));
     if (!needWeight && !needMeasure) return;
     state.weightAsked = true;
-    if (needMeasure) { try { localStorage.setItem('measureAsked', state.today); } catch (_) { /* ignore */ } }
+    if (needWeight) markAsked('weightAsked');
+    if (needMeasure) markAsked('measureAsked');
+    const lastVals = last && (last.chest != null || last.waist != null || last.hips != null)
+      ? `: ОГ ${last.chest != null ? fmt(last.chest, 1) : '–'} · ОТ ${last.waist != null ? fmt(last.waist, 1) : '–'} · ОБ ${last.hips != null ? fmt(last.hips, 1) : '–'}` : '';
     openModal(`
       <h3>${needMeasure ? 'Две недели прошли: замеры' : 'Какой сегодня вес?'}</h3>
       <form class="form" id="ci-form">
         ${needWeight ? '<label>Вес, кг <input name="kg" type="number" step="0.1" inputmode="decimal" autofocus></label>' : ''}
-        ${needMeasure ? `<p class="muted" style="margin:6px 2px 0">Прошлый замер ${shortDate(last.date)}: ОГ ${last.chest != null ? fmt(last.chest, 1) : '–'} · ОТ ${last.waist != null ? fmt(last.waist, 1) : '–'} · ОБ ${last.hips != null ? fmt(last.hips, 1) : '–'}</p>
+        ${needMeasure ? `<p class="muted" style="margin:6px 2px 0">Прошлый замер ${shortDate(last.date)}${lastVals}</p>
           <div class="row2"><label>ОГ, см <input name="chest" type="number" step="0.1" inputmode="decimal"></label>
           <label>ОТ, см <input name="waist" type="number" step="0.1" inputmode="decimal"></label>
           <label>ОБ, см <input name="hips" type="number" step="0.1" inputmode="decimal"></label></div>` : ''}
@@ -1458,6 +1507,63 @@
         if (state.tab === 'goals') loadGoals();
       });
     });
+  }
+
+  // ---------- phone notifications (Web Push) ----------
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const b64ToBytes = (s) => { const b = atob((s + '='.repeat((4 - (s.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, (c) => c.charCodeAt(0)); };
+
+  async function renderPush() {
+    const box = $('#push-card');
+    let on = false;
+    if (pushSupported() && Notification.permission === 'granted') {
+      try { const reg = await navigator.serviceWorker.ready; on = !!(await reg.pushManager.getSubscription()); } catch (_) { /* ignore */ }
+    }
+    if (!pushSupported()) {
+      box.innerHTML = `<h3>Уведомления</h3><p class="muted">Чтобы телефон напоминал про замеры, открой приложение с иконки на экране «Домой», а не в браузере, и нажми здесь «Включить».</p>`;
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      box.innerHTML = `<h3>Уведомления</h3><p class="muted">Уведомления запрещены в настройках телефона: Настройки → Уведомления → MealLog → Допуск уведомлений.</p>`;
+      return;
+    }
+    box.innerHTML = on
+      ? `<h3>Уведомления <small class="ok">включены</small></h3><p class="muted">В день замеров в 10:00 придёт напоминание, и ещё одно через два дня, если замеры не записаны.</p>
+         <button class="btn ghost" id="push-test">Прислать проверочное</button>`
+      : `<h3>Уведомления</h3><p class="muted">Раз в две недели телефон напомнит про замеры ОГ, ОТ, ОБ.</p>
+         <button class="btn" id="push-on">Включить напоминания</button>`;
+    const onBtn = $('#push-on', box), testBtn = $('#push-test', box);
+    if (onBtn) onBtn.addEventListener('click', enablePush);
+    if (testBtn) testBtn.addEventListener('click', async () => {
+      const r = await api('/api/push/test', { method: 'POST' });
+      toast(r.sent ? 'Отправлено, проверь экран' : 'Не дошло, нажми «Включить» ещё раз');
+    });
+  }
+
+  async function enablePush() {
+    try {
+      if ((await Notification.requestPermission()) !== 'granted') { renderPush(); return; }
+      const reg = await navigator.serviceWorker.ready;
+      const { key } = await api('/api/push/key');
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+      await api('/api/push/subscribe', { method: 'POST', body: sub.toJSON() });
+      await api('/api/push/test', { method: 'POST' });
+      toast('Напоминания включены');
+    } catch (err) {
+      toast('Не получилось включить: ' + (err.message || err));
+    }
+    renderPush();
+  }
+
+  // re-send the current subscription now and then: the phone may rotate it
+  async function syncPush() {
+    if (!pushSupported() || Notification.permission !== 'granted') return;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) await api('/api/push/subscribe', { method: 'POST', body: sub.toJSON() });
+    } catch (_) { /* offline */ }
   }
 
   // ---------- lifecycle ----------
@@ -1485,6 +1591,10 @@
   state.date = state.today;
   let initial = 'journal';
   try { initial = localStorage.getItem('tab') || 'journal'; } catch (_) { /* ignore */ }
+  try { state.prodView = localStorage.getItem('prodView') || 'fridge'; } catch (_) { /* ignore */ }
   showTab(initial);
-  checkIns();
+  const fromPush = new URLSearchParams(location.search).has('checkin');
+  if (fromPush) history.replaceState(null, '', '/');
+  checkIns(fromPush);
+  syncPush();
 })();

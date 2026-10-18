@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 import db
+import push
 
 log = logging.getLogger("meallog")
 
@@ -461,6 +462,24 @@ def api_measurements(request, conn, body):
                                                 hips=_num(body.get("hips")), day=body.get("date"))}
 
 
+@api("/api/push/key", ["GET"])
+def api_push_key(request, conn, body):
+    return {"key": push.public_key(), "count": conn.execute("SELECT COUNT(*) FROM push_subs").fetchone()[0]}
+
+
+@api("/api/push/subscribe", ["POST"])
+def api_push_subscribe(request, conn, body):
+    push.save_subscription(conn, body)
+    return {"ok": True}
+
+
+@api("/api/push/test", ["POST"])
+def api_push_test(request, conn, body):
+    n = push.send_all(conn, {"title": "Напоминания включены", "body": "Про замеры напомню здесь, когда пройдут две недели.",
+                             "tag": "test", "url": "/"})
+    return {"sent": n}
+
+
 @api("/api/products", ["GET"])
 def api_products(request, conn, body):
     q = request.query_params.get("q", "")
@@ -541,7 +560,8 @@ async def api_regenerate(request: Request) -> Response:
 @api("/api/goals", ["GET"])
 def api_goals(request, conn, body):
     return {"goals": db.get_goals(conn), "weight_today": db.weight_today(conn), "weight": db.list_weight(conn, 90),
-            "measurements": db.list_measurements(conn, None), "today": db.today()}
+            "measurements": db.list_measurements(conn, None), "measure_due": db.measure_due(conn),
+            "today": db.today(), "now_hour": db.now_local().hour}
 
 
 @api("/api/goals", ["PUT"])
@@ -595,4 +615,6 @@ app = build_app()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    import threading
+    threading.Thread(target=push.reminder_loop, daemon=True, name="reminders").start()
     uvicorn.run(app, host=HOST, port=PORT, proxy_headers=True, forwarded_allow_ips="127.0.0.1")
