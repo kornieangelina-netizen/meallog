@@ -1,6 +1,7 @@
-// Bump CACHE on every change to app.js / styles.css / index.html: the app reloads itself on next open.
-const CACHE = 'meallog-v6';
-const ASSETS = ['/', '/app.js', '/styles.css', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+// Bump CACHE and the ?v= in index.html on every change to app.js / styles.css / index.html:
+// the app reloads itself on next open, and the new index.html never runs with an old app.js.
+const CACHE = 'meallog-v7';
+const ASSETS = ['/', '/app.js?v=7', '/styles.css?v=7', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -30,7 +31,7 @@ self.addEventListener('fetch', (e) => {
     fetch(e.request).then((res) => {
       if (res.ok && !res.redirected) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
       return res;
-    }).catch(() => caches.match(e.request))
+    }).catch(() => caches.match(e.request, { ignoreSearch: true }))
   );
 });
 

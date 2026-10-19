@@ -382,7 +382,9 @@ async def static_file(request: Request) -> Response:
     name = request.path_params["filename"]
     if name not in PUBLIC_FILES:
         return Response("not found", status_code=404)
-    headers = {"Cache-Control": "no-cache"} if name == "service-worker.js" else {"Cache-Control": "max-age=3600"}
+    # app code must never come from the phone's HTTP cache next to a newer index.html (a blank app)
+    headers = {"Cache-Control": "no-cache"} if name in ("service-worker.js", "app.js", "styles.css") \
+        else {"Cache-Control": "max-age=3600"}
     return FileResponse(WEBAPP_DIR / name, headers=headers)
 
 
