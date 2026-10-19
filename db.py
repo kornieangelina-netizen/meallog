@@ -449,6 +449,21 @@ def import_rows(conn, rows: list[dict], clear_imported: bool = False) -> dict:
     return {"imported": n, "deleted": deleted}
 
 
+EXPORT_TABLES = ["meals", "products", "recipes", "recipe_items", "goals", "weight_log", "measurements", "kv"]
+
+
+def export_data(conn, since: str | None = None) -> dict:
+    """Every user table as plain rows, for a copy kept outside the server. since='YYYY-MM-DD' limits
+    meals to that date and later (other tables are small and always exported whole)."""
+    out = {"exported_at": now_local().isoformat(timespec="seconds"), "since": since}
+    for t in EXPORT_TABLES:
+        if t == "meals" and since:
+            out[t] = _rows(conn.execute("SELECT * FROM meals WHERE meal_date >= ? ORDER BY logged_at", (since,)))
+        else:
+            out[t] = _rows(conn.execute(f"SELECT * FROM {t}"))
+    return out
+
+
 def update_meal(conn, meal_id: int, **fields) -> dict | None:
     """Edit a diary entry. Accepts name, description, grams, kcal, protein, fat, carbs, when, slot.
 

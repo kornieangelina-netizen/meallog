@@ -237,6 +237,14 @@ def import_meals(rows: list[dict] | None = None, csv_text: str | None = None, cl
 
 
 @mcp.tool()
+def export_data(since: str | None = None) -> dict:
+    """Резервная копия всех данных (дневник, справочник, рецепты, цели, вес, замеры) одним JSON.
+    since: 'YYYY-MM-DD', тогда дневник только с этой даты; без since — всё целиком."""
+    with db.tx() as conn:
+        return db.export_data(conn, since)
+
+
+@mcp.tool()
 def delete_meal(meal_id: int) -> dict:
     """Удалить ошибочную запись дневника по id (вернёт списанное в холодильник и снимет галочку в плане)."""
     with db.tx() as conn:
