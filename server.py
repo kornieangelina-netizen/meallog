@@ -46,7 +46,8 @@ INSTRUCTIONS = f"""Ты ведёшь личный дневник питания 
    чтобы взять известные КБЖУ из справочника, и только если позиции нет, оцени КБЖУ сам и вызови log_meal.
    Если позиция найдена, вызови log_product с количеством порций или граммов.
 2. Подпись «в холодильник», «купил», «привезли» означает «ещё не съел»: только save_product с fridge_add,
-   в дневник ничего не писать.
+   в дневник ничего не писать. Укажи shelf: home (приготовила сама), delivery (готовая еда из доставки),
+   ready (можно съесть сразу), cook (продукты для готовки).
 3. Никогда не выдумывай КБЖУ для позиций, которые есть в справочнике. Для новых блюд оценивай честно
    и указывай примерный вес.
 4. Значения в log_meal всегда на съеденную порцию целиком, не на 100 г.
@@ -68,7 +69,7 @@ mcp = MCPServer("MealLog", instructions=INSTRUCTIONS)
 def _public_product(p: dict) -> dict:
     keys = ("id", "name", "basis", "kcal", "protein", "fat", "carbs", "grams", "category",
             "aliases", "fridge_qty", "urgent", "lactose", "sugar")
-    return {k: p.get(k) for k in keys}
+    return {**{k: p.get(k) for k in keys}, "shelf": db.shelf_of(p)}
 
 
 def _public_meal(m: dict) -> dict:
@@ -125,18 +126,21 @@ def log_meal(name: str, kcal: float, protein: float, fat: float, carbs: float,
 def save_product(name: str, kcal: float, protein: float, fat: float, carbs: float,
                  basis: str = "portion", grams: float | None = None, category: str = "",
                  aliases: str = "", fridge_add: float = 0,
-                 lactose: bool | None = None, sugar: bool | None = None) -> dict:
+                 lactose: bool | None = None, sugar: bool | None = None, shelf: str | None = None) -> dict:
     """Создать или обновить позицию справочника (по названию, без дублей). В дневник НЕ пишет.
 
     basis: 'portion' (КБЖУ на одну порцию/штуку, grams = вес порции) или '100g' (КБЖУ на 100 г).
     fridge_add: сколько добавить в холодильник (штук для 'portion', граммов для '100g').
     category: например 'доставка', 'спортпит', 'молочное', 'мясо'. aliases: синонимы через запятую.
     lactose/sugar: флаги состава (лактоза, добавленный сахар). Для таблицы доставки вызывай по одной позиции.
+    shelf: полка холодильника. 'home' — приготовила сама, 'delivery' — готовая еда из доставки,
+    'ready' — можно съесть сразу (молоко, снеки, спортпит), 'cook' — продукты для готовки (сырое мясо, крупы,
+    овощи, мука, яйца). Сырые продукты из заказа продуктов клади в 'cook'.
     """
     with db.tx() as conn:
         p = db.save_product(conn, name, basis=basis, kcal=kcal, protein=protein, fat=fat, carbs=carbs,
                             grams=grams, category=category, aliases=aliases, fridge_add=fridge_add,
-                            lactose=lactose, sugar=sugar)
+                            lactose=lactose, sugar=sugar, shelf=shelf)
     return {"product": _public_product(p)}
 
 
@@ -181,18 +185,21 @@ def update_meal(meal_id: int, name: str | None = None, grams: float | None = Non
 
 @mcp.tool()
 def save_recipe(name: str, items: list[dict], cooked_grams: float, portion_grams: float | None = None,
-                to_fridge: bool = False, deduct: bool = False, recipe_id: int | None = None) -> dict:
+                to_fridge: bool = False, deduct: bool = False, recipe_id: int | None = None,
+                kind: str = "dish") -> dict:
     """Сохранить рецепт (блюдо из ингредиентов) и создать позицию справочника «на 100 г ГОТОВОГО блюда».
 
     items: список ингредиентов. Каждый: либо {"product_id": id, "grams": г} (из справочника),
     либо {"name": ..., "grams": г, "kcal": .., "protein": .., "fat": .., "carbs": ..} с КБЖУ НА ЭТИ ГРАММЫ.
+    У ингредиента может быть "note" (например «сырой вес»).
     cooked_grams: вес готового блюда после готовки (обязательно). portion_grams: обычная порция, г.
     to_fridge: положить готовое блюдо в холодильник (cooked_grams г). deduct: списать ингредиенты из холодильника.
+    kind: "dish" — готовое блюдо, "base" — заготовка для блюд (блины, запечённая курица, отварная крупа).
     Потом съеденное логируется через log_product(product_id, grams=...).
     """
     with db.tx() as conn:
         r = db.save_recipe(conn, name, items, cooked_grams=cooked_grams, recipe_id=recipe_id,
-                           portion_grams=portion_grams, to_fridge=to_fridge, deduct=deduct)
+                           portion_grams=portion_grams, to_fridge=to_fridge, deduct=deduct, kind=kind)
     return {"recipe": r}
 
 
@@ -455,7 +462,8 @@ def api_recipes(request, conn, body):
 def api_save_recipe(request, conn, body):
     r = db.save_recipe(conn, body["name"], body.get("items") or [], cooked_grams=_num(body.get("cooked_grams")),
                        recipe_id=body.get("id"), portion_grams=_num(body.get("portion_grams")),
-                       note=body.get("note", ""), to_fridge=bool(body.get("to_fridge")), deduct=bool(body.get("deduct")))
+                       note=body.get("note", ""), to_fridge=bool(body.get("to_fridge")), deduct=bool(body.get("deduct")),
+                       kind=body.get("kind"))
     return {"recipe": r}
 
 
@@ -505,7 +513,7 @@ def api_save_product(request, conn, body):
                         carbs=_num(body.get("carbs"), 0), grams=_num(body.get("grams")),
                         category=body.get("category", ""), aliases=body.get("aliases", ""),
                         fridge_add=_num(body.get("fridge_add"), 0), lactose=body.get("lactose"),
-                        sugar=body.get("sugar"))
+                        sugar=body.get("sugar"), shelf=body.get("shelf"))
     return {"product": p}
 
 

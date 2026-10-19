@@ -176,7 +176,29 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("recommendations", "note", "TEXT DEFAULT ''"),
     ("meals", "slot", "TEXT"),
     ("products", "recipe_id", "INTEGER"),
+    ("recipes", "kind", "TEXT NOT NULL DEFAULT 'dish'"),
+    ("recipe_items", "note", "TEXT DEFAULT ''"),
+    ("products", "shelf", "TEXT"),
 ]
+
+# Fridge shelves: home = cooked by the user, delivery = ready meals ordered in, ready = eat as is
+# (milk, snacks, sports nutrition), cook = ingredients for cooking. Unset shelf is inferred from category.
+SHELVES = ("home", "delivery", "ready", "cook")
+_COOK_CATEGORIES = {"мясо", "птица", "рыба", "крупы", "крупа", "овощи", "фрукты", "ягоды", "бакалея", "мука",
+                    "яйца", "зелень", "ингредиенты", "заморозка", "макароны", "специи", "масло"}
+
+
+def shelf_of(p: dict) -> str:
+    if p.get("shelf") in SHELVES:
+        return p["shelf"]
+    cat = norm_key(p.get("category") or "")
+    if p.get("recipe_id") or cat in ("домашнее", "рецепт"):
+        return "home"
+    if cat == "доставка":
+        return "delivery"
+    if cat in _COOK_CATEGORIES:
+        return "cook"
+    return "ready"
 
 
 def connect() -> sqlite3.Connection:
@@ -251,7 +273,7 @@ def search_products(conn, query: str, limit: int = 15) -> list[dict]:
     for r in conn.execute("SELECT * FROM products ORDER BY fridge_qty DESC, name"):
         hay = norm_key(r["name"] + " " + (r["aliases"] or ""))
         if not words or all(w in hay for w in words):
-            out.append(dict(r))
+            out.append({**dict(r), "shelf": shelf_of(dict(r))})
             if len(out) >= limit:
                 break
     return out
@@ -271,8 +293,10 @@ def save_product(
     fridge_add: float = 0,
     lactose: bool | None = None,
     sugar: bool | None = None,
+    shelf: str | None = None,
 ) -> dict:
     """Create or update a catalogue entry (matched by case-insensitive name)."""
+    shelf = shelf if shelf in SHELVES else None
     if basis not in ("portion", "100g"):
         raise ValueError("basis must be 'portion' or '100g'")
     name = " ".join(name.split())
@@ -283,19 +307,19 @@ def save_product(
             """UPDATE products SET basis=?, kcal=?, protein=?, fat=?, carbs=?, grams=?,
                category=COALESCE(NULLIF(?, ''), category), aliases=COALESCE(NULLIF(?, ''), aliases),
                fridge_qty=MAX(0, fridge_qty + ?),
-               lactose=COALESCE(?, lactose), sugar=COALESCE(?, sugar), updated_at=?
+               lactose=COALESCE(?, lactose), sugar=COALESCE(?, sugar), shelf=COALESCE(?, shelf), updated_at=?
                WHERE id=?""",
             (basis, kcal, protein, fat, carbs, grams, category, aliases, fridge_add,
              None if lactose is None else int(lactose), None if sugar is None else int(sugar),
-             ts, existing["id"]),
+             shelf, ts, existing["id"]),
         )
         return get_product(conn, existing["id"])
     cur = conn.execute(
         """INSERT INTO products (name, name_key, basis, kcal, protein, fat, carbs, grams, category,
-           aliases, fridge_qty, lactose, sugar, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           aliases, fridge_qty, lactose, sugar, shelf, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (name, norm_key(name), basis, kcal, protein, fat, carbs, grams, category, aliases,
-         max(0.0, fridge_add), int(bool(lactose)), int(bool(sugar)), ts),
+         max(0.0, fridge_add), int(bool(lactose)), int(bool(sugar)), shelf, ts),
     )
     return get_product(conn, cur.lastrowid)
 
@@ -329,13 +353,18 @@ def set_product_flags(conn, product_id: int, urgent=None, lactose=None, sugar=No
 
 def list_products(conn) -> list[dict]:
     """All products with last_eaten: the latest diary date this product was logged on (None if never)."""
-    return _rows(conn.execute(
+    rows = _rows(conn.execute(
         "SELECT p.*, (SELECT MAX(m.meal_date) FROM meals m WHERE m.product_id = p.id) AS last_eaten "
         "FROM products p ORDER BY p.category, p.name"))
+    for p in rows:
+        p["shelf"] = shelf_of(p)
+    return rows
 
 
 def list_fridge(conn) -> dict:
     items = _rows(conn.execute("SELECT * FROM products WHERE fridge_qty > 0 ORDER BY urgent DESC, category, name"))
+    for p in items:
+        p["shelf"] = shelf_of(p)
     totals = {m: 0.0 for m in MACROS}
     for p in items:
         vals = macros_for(p, portions=p["fridge_qty"] if p["basis"] == "portion" else None,
@@ -648,20 +677,23 @@ def _recipe_item_macros(conn, item: dict) -> dict:
             raise ValueError(f"product {pid} not found")
         vals = macros_for(p, grams=grams) if grams else macros_for(p, portions=float(item.get("portions") or 1))
         return {"product_id": p["id"], "name": item.get("name") or p["name"], "grams": vals["grams"] or grams,
-                **{m: vals[m] for m in MACROS}}
+                "note": (item.get("note") or "").strip(), **{m: vals[m] for m in MACROS}}
     return {"product_id": pid, "name": (item.get("name") or "").strip() or "Ингредиент", "grams": grams,
-            **{m: round(float(item.get(m) or 0), 1) for m in MACROS}}
+            "note": (item.get("note") or "").strip(), **{m: round(float(item.get(m) or 0), 1) for m in MACROS}}
 
 
 def save_recipe(conn, name: str, items: list[dict], cooked_grams: float | None = None,
                 recipe_id: int | None = None, portion_grams: float | None = None, note: str = "",
-                to_fridge: bool = False, deduct: bool = False) -> dict:
+                to_fridge: bool = False, deduct: bool = False, kind: str | None = None) -> dict:
     """Create or update a recipe and its catalogue product (basis '100g' of the cooked dish).
 
     items: [{product_id?, name?, grams, kcal?, protein?, fat?, carbs?}] — absolute values per line.
     cooked_grams: weight after cooking (default: sum of raw grams). The product's per-100-g values are
     totals / cooked_grams, so logging N g of the dish is exact. to_fridge adds cooked_grams of the dish
     to the fridge; deduct removes the catalogue ingredients from the fridge (cooking consumes them).
+    kind: 'dish' (a ready meal) or 'base' (a batch cooked to be used in dishes: pancakes, baked chicken).
+    A dish already in the catalogue as a whole portion (a meal-prep box in the fridge) stays a portion
+    product: its values are updated per portion, so the fridge count in pieces keeps its meaning.
     """
     lines = [_recipe_item_macros(conn, it) for it in items if it]
     raw = round(sum(l["grams"] for l in lines), 1)
@@ -673,22 +705,32 @@ def save_recipe(conn, name: str, items: list[dict], cooked_grams: float | None =
     name = name.strip()
     now = now_local().isoformat(timespec="seconds")
     old = get_recipe(conn, recipe_id) if recipe_id else None
+    kind = kind if kind in ("dish", "base") else (old["kind"] if old else "dish")
     if old:
-        conn.execute("UPDATE recipes SET name=?, raw_grams=?, cooked_grams=?, portion_grams=?, note=?, updated_at=? WHERE id=?",
-                     (name, raw, cooked, portion_grams, note, now, recipe_id))
+        conn.execute("UPDATE recipes SET name=?, raw_grams=?, cooked_grams=?, portion_grams=?, note=?, kind=?, updated_at=? WHERE id=?",
+                     (name, raw, cooked, portion_grams, note, kind, now, recipe_id))
         conn.execute("DELETE FROM recipe_items WHERE recipe_id=?", (recipe_id,))
         if old["product_id"] and old["name"] != name:
             conn.execute("UPDATE products SET name=?, name_key=? WHERE id=?", (name, norm_key(name), old["product_id"]))
     else:
-        cur = conn.execute("INSERT INTO recipes (name, raw_grams, cooked_grams, portion_grams, note, updated_at) VALUES (?,?,?,?,?,?)",
-                           (name, raw, cooked, portion_grams, note, now))
+        cur = conn.execute("INSERT INTO recipes (name, raw_grams, cooked_grams, portion_grams, note, kind, updated_at) VALUES (?,?,?,?,?,?,?)",
+                           (name, raw, cooked, portion_grams, note, kind, now))
         recipe_id = cur.lastrowid
     for l in lines:
-        conn.execute("INSERT INTO recipe_items (recipe_id, product_id, name, grams, kcal, protein, fat, carbs) VALUES (?,?,?,?,?,?,?,?)",
-                     (recipe_id, l["product_id"], l["name"], l["grams"], l["kcal"], l["protein"], l["fat"], l["carbs"]))
-    p = save_product(conn, name, basis="100g", kcal=per100["kcal"], protein=per100["protein"], fat=per100["fat"],
-                     carbs=per100["carbs"], grams=portion_grams, category="рецепт",
-                     fridge_add=cooked if to_fridge else 0)
+        conn.execute("INSERT INTO recipe_items (recipe_id, product_id, name, grams, kcal, protein, fat, carbs, note) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (recipe_id, l["product_id"], l["name"], l["grams"], l["kcal"], l["protein"], l["fat"], l["carbs"], l.get("note", "")))
+    linked = get_product(conn, old["product_id"]) if old and old["product_id"] else find_product_by_name(conn, name)
+    if linked and linked["basis"] == "portion":
+        pg = float(linked["grams"] or portion_grams or cooked)
+        k = pg / 100
+        conn.execute("UPDATE products SET kcal=?, protein=?, fat=?, carbs=?, grams=?, fridge_qty=fridge_qty+?, updated_at=? WHERE id=?",
+                     (*(round(per100[m] * k, 1) for m in MACROS), pg, round(cooked / pg, 2) if to_fridge else 0, now,
+                      linked["id"]))
+        p = get_product(conn, linked["id"])
+    else:
+        p = save_product(conn, name, basis="100g", kcal=per100["kcal"], protein=per100["protein"], fat=per100["fat"],
+                         carbs=per100["carbs"], grams=portion_grams, category="рецепт",
+                         fridge_add=cooked if to_fridge else 0)
     conn.execute("UPDATE products SET recipe_id=? WHERE id=?", (recipe_id, p["id"]))
     conn.execute("UPDATE recipes SET product_id=? WHERE id=?", (p["id"], recipe_id))
     if deduct:

@@ -20,6 +20,35 @@ class DbTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_recipe_keeps_portion_product(self):
+        """A meal-prep box already in the fridge as 1 portion stays a portion after its recipe is saved."""
+        db = self.db
+        with db.tx() as c:
+            box = db.save_product(c, "Птитим с курицей", basis="portion", kcal=400, protein=40, fat=7, carbs=50,
+                                  grams=400, category="домашнее", fridge_add=1)
+            r = db.save_recipe(c, "Птитим с курицей", [{"name": "Птитим", "grams": 200, "kcal": 210, "protein": 7, "fat": 0.4, "carbs": 44, "note": "отварной"},
+                                                   {"name": "Курица", "grams": 158, "kcal": 190, "protein": 33, "fat": 6.3, "carbs": 0}],
+                               cooked_grams=400, kind="dish")
+            p = db.get_product(c, box["id"])
+            self.assertEqual(r["product_id"], box["id"])
+            self.assertEqual((p["basis"], p["fridge_qty"], p["kcal"]), ("portion", 1, 400))
+            self.assertEqual(r["items"][0]["note"], "отварной")
+            base = db.save_recipe(c, "Блины", [{"name": "Мука", "grams": 28, "kcal": 100, "protein": 3, "fat": 0, "carbs": 20}],
+                                  cooked_grams=50, kind="base")
+            self.assertEqual(base["kind"], "base")
+            self.assertEqual(db.get_product(c, base["product_id"])["basis"], "100g")
+
+    def test_shelves(self):
+        db = self.db
+        with db.tx() as c:
+            a = db.save_product(c, "Зразы", category="доставка")
+            b = db.save_product(c, "Молоко", category="молочное")
+            d = db.save_product(c, "Филе грудки", category="мясо")
+            e = db.save_product(c, "Гречка", shelf="cook")
+            self.assertEqual([db.shelf_of(x) for x in (a, b, d, e)], ["delivery", "ready", "cook", "cook"])
+            db.save_product(c, "Молоко", category="молочное", shelf="cook")
+            self.assertEqual(db.shelf_of(db.find_product_by_name(c, "Молоко")), "cook")
+
     def test_product_log_and_fridge(self):
         db = self.db
         with db.tx() as c:

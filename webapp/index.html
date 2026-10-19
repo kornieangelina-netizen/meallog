@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="MealLog">
@@ -37,28 +37,18 @@
   <section id="tab-journal" class="tab active">
     <div class="card hero" id="hero"></div>
     <p class="pace" id="pace"></p>
-    <div id="fits"></div>
+    <div id="left-card"></div>
     <p class="empty" id="meals-empty" hidden>Записей пока нет. Отправь фото еды Claude или нажми «+» у любого приёма.</p>
     <div id="meals"></div>
-  </section>
-
-  <!-- План -->
-  <section id="tab-recs" class="tab">
-    <div class="rec-actions">
-      <button id="regen" class="btn">Собрать план</button>
-    </div>
-    <p class="muted" id="rec-comment"></p>
-    <div id="recs"></div>
-    <p class="empty" id="recs-empty" hidden>Плана на этот день нет.</p>
   </section>
 
   <!-- Продукты -->
   <section id="tab-products" class="tab">
     <div class="seg prod-seg" id="prod-seg"><button data-v="fridge" class="on">В холодильнике <small></small></button><button data-v="eaten">Съедено <small></small></button></div>
-    <input type="search" id="product-search" placeholder="Поиск по справочнику" autocomplete="off">
-    <div id="quick"></div>
+    <div class="search-row"><input type="search" id="product-search" placeholder="Поиск по справочнику" autocomplete="off"><button class="add-btn" id="add-product" type="button" aria-label="Добавить продукт или рецепт">+</button></div>
+    <button class="recipes-btn card" id="open-recipes" type="button"></button>
+    <div id="shelf-chips"></div>
     <div id="products"></div>
-    <button class="fab" id="add-product" aria-label="Добавить продукт">+</button>
   </section>
 
   <!-- Аналитика -->
@@ -108,8 +98,6 @@
 <nav class="tabs">
   <button data-tab="journal" class="on">
     <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg><span>Журнал</span></button>
-  <button data-tab="recs">
-    <svg viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg><span>План</span></button>
   <button data-tab="products">
     <svg viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18" rx="2"/><path d="M6 11h12M9 7v2M9 14v3"/></svg><span>Продукты</span></button>
   <button data-tab="analytics">
@@ -123,6 +111,11 @@
     <div class="grip"></div>
     <div id="modal-body"></div>
   </div>
+</div>
+
+<div class="page" id="page" hidden>
+  <div class="page-top"><button class="page-back" id="page-back" aria-label="Назад">‹</button><b id="page-title"></b><span id="page-act"></span></div>
+  <div class="page-body" id="page-body"></div>
 </div>
 
 <script src="/app.js"></script>

@@ -13,7 +13,6 @@
   const UNIT = { kcal: 'ккал', protein: 'г', fat: 'г', carbs: 'г' };
   const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
   const MONTHS_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
-  const SLOT_ORDER = ['breakfast', 'snack1', 'lunch', 'snack2', 'dinner']; // plan slots, in day order
   const WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
   const WEEKDAYS_LONG = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'];
   const css = getComputedStyle(document.documentElement);
@@ -22,9 +21,12 @@
   const state = {
     tab: 'journal',
     prodView: 'fridge',
+    shelf: 'all',        // fridge filter: all | home | delivery | ready | cook
+    sort: 'default',     // product order: default | protein | carbs | fat | kcal
+    leftFocus: null,     // remainder card: null = auto (the least covered of protein / carbs)
+    leftAll: false,      // remainder card: whole catalogue, not only the fridge
     date: null,          // selected day, 'YYYY-MM-DD'
     today: null,         // local today, refreshed on wake
-    serverToday: null,   // from /api/recs
     firstDate: null,     // earliest diary day (calendar range start)
     dayTotals: {},       // date -> {kcal, protein, fat, carbs, n}
     goals: null,
@@ -68,7 +70,7 @@
   const localToday = () => iso(new Date());
   const weekdayIdx = (s) => (parse(s).getDay() + 6) % 7; // 0 = Monday
   const weekStart = (s) => addDays(s, -weekdayIdx(s));
-  const maxDate = () => addDays(state.today, 1); // plan for tomorrow is allowed
+  const maxDate = () => state.today;
 
   function dateTitle(s) {
     if (s === state.today) return 'Сегодня';
@@ -114,21 +116,33 @@
     </svg>`;
   }
 
-  // swipe-to-reveal actions on .item elements
-  function swipeable(el) {
-    let x0 = null;
-    el.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; }, { passive: true });
-    el.addEventListener('touchend', (e) => {
-      if (x0 == null) return;
-      const dx = e.changedTouches[0].clientX - x0;
-      if (dx < -40) { $$('.item.open').forEach((o) => o !== el && o.classList.remove('open')); el.classList.add('open'); }
-      else if (dx > 40) el.classList.remove('open');
-      x0 = null;
-    }, { passive: true });
-    el.querySelector('.row').addEventListener('click', () => {
-      if (el.classList.contains('open')) el.classList.remove('open');
-    });
+  // share of a product's calories that comes from one macro (works for per-portion and per-100 g alike)
+  const kcalShare = (p, m) => {
+    const t = p.protein * 4 + p.fat * 9 + p.carbs * 4;
+    return t > 0 ? (p[m] * (m === 'fat' ? 9 : 4)) / t : 0;
+  };
+  const SORTS = { default: 'Обычно', protein: 'Больше белка', carbs: 'Больше углеводов', fat: 'Меньше жира', kcal: 'Меньше ккал' };
+  // per-100 g values when the weight is known, so portion and 100 g items compare fairly
+  const per100 = (p) => (p.basis === '100g' ? p : p.grams ? Object.fromEntries(MACROS.map((m) => [m, (p[m] * 100) / p.grams])) : null);
+  function sortProducts(items, how) {
+    if (how === 'default' || !how) return items;
+    const key = {
+      protein: (p) => -kcalShare(p, 'protein'),
+      carbs: (p) => -kcalShare(p, 'carbs'),
+      fat: (p) => kcalShare(p, 'fat'),
+      kcal: (p) => { const h = per100(p); return h ? h.kcal : p.kcal; },
+    }[how];
+    return [...items].sort((a, b) => key(a) - key(b));
   }
+  // small badge for the active sort, e.g. «Б 46%» of calories
+  function sortBadge(p, how) {
+    if (how === 'protein' || how === 'carbs' || how === 'fat') {
+      return `<span class="badge ${how}">${MACRO_SHORT[how]} ${Math.round(kcalShare(p, how) * 100)}%</span>`;
+    }
+    if (how === 'kcal') { const h = per100(p); return h ? `<span class="badge kcal">${fmt(h.kcal)} / 100 г</span>` : ''; }
+    return '';
+  }
+  const sortChips = (id, cur) => `<div class="sort-chips" id="${id}">${Object.entries(SORTS).map(([k, t]) => `<button type="button" data-s="${k}" class="${k === cur ? 'on' : ''}">${t}</button>`).join('')}</div>`;
 
   // ---------- modal ----------
   const modal = $('#modal');
@@ -141,12 +155,12 @@
   modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 
   // ---------- tabs ----------
-  const TITLES = { journal: 'Журнал', recs: 'План на день', products: 'Продукты', analytics: 'Аналитика', goals: 'Цели' };
+  const TITLES = { journal: 'Журнал', products: 'Продукты', analytics: 'Аналитика', goals: 'Цели' };
   function showTab(tab) {
     state.tab = tab;
     $$('.tab').forEach((s) => s.classList.toggle('active', s.id === `tab-${tab}`));
     $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
-    const dated = tab === 'journal' || tab === 'recs';
+    const dated = tab === 'journal';
     $('#title').textContent = TITLES[tab];
     $('#week-wrap').hidden = !dated;
     $('#month-btn').hidden = !dated;
@@ -156,11 +170,11 @@
   $$('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
 
   function refresh() {
-    const dated = state.tab === 'journal' || state.tab === 'recs';
+    const dated = state.tab === 'journal';
     $('#date-title').textContent = dated ? dateTitle(state.date) : TITLES[state.tab];
     $('#title').textContent = dated ? `${TITLES[state.tab]} · ${WEEKDAYS_LONG[weekdayIdx(state.date)]}` : ({ analytics: 'Питание в цифрах', products: 'Справочник и холодильник', goals: 'Настройки' }[state.tab]);
     if (dated) renderWeeks();
-    const r = { journal: loadJournal, recs: loadRecs, products: loadProducts, analytics: loadAnalytics, goals: loadGoals }[state.tab];
+    const r = { journal: loadJournal, products: loadProducts, analytics: loadAnalytics, goals: loadGoals }[state.tab];
     r && r().catch((e) => toast(e.message));
   }
 
@@ -178,7 +192,6 @@
     const d = await api(`/api/days?start=${start}&end=${end}`);
     state.dayTotals = Object.fromEntries(d.days.map((x) => [x.date, x]));
     state.goals = d.goals;
-    state.serverToday = d.today;
     if (d.days.length) state.firstDate = d.days[0].date;
   }
 
@@ -281,7 +294,7 @@
     const m = $('main');
     m.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
     m.addEventListener('touchend', (e) => {
-      if (x0 == null || !(state.tab === 'journal' || state.tab === 'recs')) return;
+      if (x0 == null || state.tab !== 'journal' || !modal.hidden || !$('#page').hidden) return;
       const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
       if (Math.abs(dx) > 70 && Math.abs(dy) < 40 && !e.target.closest('.item')) setDate(addDays(state.date, dx < 0 ? 1 : -1));
       x0 = y0 = null;
@@ -320,7 +333,7 @@
     if (d.count) state.dayTotals[state.date] = { date: state.date, ...d.totals, n: d.count }; else delete state.dayTotals[state.date];
     renderWeeks();
     renderHero(d);
-    renderFits(d);
+    renderLeft(d);
     const box = $('#meals');
     box.innerHTML = '';
     $('#meals-empty').hidden = d.meals.length > 0;
@@ -328,12 +341,14 @@
     for (const m of d.meals) (bySlot[m.slot || 'snack'] = bySlot[m.slot || 'snack'] || []).push(m);
     for (const slot of SLOTS) {
       const items = bySlot[slot] || [];
-      const kcal = items.reduce((a, m) => a + m.kcal, 0);
+      const sum = Object.fromEntries(MACROS.map((k) => [k, items.reduce((a, m) => a + m[k], 0)]));
       const sec = document.createElement('section');
       sec.className = `slot-sec ${items.length ? '' : 'empty'}`;
+      // per-meal Б/Ж/У and share of the day's calories, as in FatSecret
       sec.innerHTML = `<div class="slot-head"><span class="slot-title">${SLOT_TITLES[slot]}</span>
-          <span class="slot-sum">${items.length ? `<b>${fmt(kcal)}</b> ккал` : ''}</span>
+          <span class="slot-sum">${items.length ? `<b>${fmt(sum.kcal)}</b> ккал${d.goals.kcal ? ` · ${Math.round((100 * sum.kcal) / d.goals.kcal)}%` : ''}` : ''}</span>
           <button class="slot-add" data-slot="${slot}" aria-label="Добавить">+</button></div>
+        ${items.length ? `<div class="slot-macros"><span><i class="dot protein"></i>Б ${fmt(sum.protein)}</span><span><i class="dot fat"></i>Ж ${fmt(sum.fat)}</span><span><i class="dot carbs"></i>У ${fmt(sum.carbs)}</span></div>` : ''}
         <ul class="list"></ul>`;
       sec.querySelector('.slot-add').addEventListener('click', () => openAddSheet(slot));
       const list = sec.querySelector('ul');
@@ -347,7 +362,6 @@
     const li = document.createElement('li');
     li.className = 'item';
     li.innerHTML = `
-      <div class="actions"><button data-del="${m.id}">Удалить</button></div>
       <div class="row">
         <div class="grow"><div class="name">${esc(title)}</div><div class="sub">${esc(sub)}</div></div>
         <div class="macros"><b>${fmt(m.kcal)}</b> <span class="k">ккал</span>
@@ -355,28 +369,57 @@
         </div>
         <span class="chev">›</span>
       </div>`;
-    li.querySelector('[data-del]').addEventListener('click', async () => {
-      await api(`/api/meals/${m.id}`, { method: 'DELETE' });
-      toast('Удалено'); state.products = []; loadJournal();
-    });
-    swipeable(li);
-    li.querySelector('.row').addEventListener('click', () => { if (!li.classList.contains('open')) openEditSheet(m); });
+    li.querySelector('.row').addEventListener('click', () => openEditSheet(m));
     return li;
   }
 
-  // fridge items that fit into what is left today, by protein density
-  function renderFits(d) {
-    const box = $('#fits');
-    const left = d.left.kcal;
-    if (state.date !== state.today || left < 100) { box.innerHTML = ''; return; }
-    const items = state.products.filter((p) => p.fridge_qty > 0).map((p) => {
-      const one = p.basis === 'portion' ? p : { ...p, kcal: p.kcal * (p.grams || 100) / 100, protein: p.protein * (p.grams || 100) / 100 };
-      return { p, kcal: one.kcal, protein: one.protein };
-    }).filter((x) => x.kcal > 0 && x.kcal <= left).sort((a, b) => (b.protein / b.kcal) - (a.protein / a.kcal)).slice(0, 6);
-    if (!items.length) { box.innerHTML = ''; return; }
-    box.innerHTML = `<div class="fits-title">Влезет в остаток <span>${fmt(left)} ккал</span></div>
-      <div class="quick">${items.map((x) => `<button data-id="${x.p.id}"><b>${fmt(x.kcal)}</b> ${esc(x.p.name)}</button>`).join('')}</div>`;
-    $$('button', box).forEach((b) => b.addEventListener('click', () => quickLog(state.products.find((p) => p.id === Number(b.dataset.id)))));
+  // "what is left" card: the day's remainder and the foods that best fill the macro covered least so far
+  // (protein or carbs, whichever has the bigger share of its goal still open). Plain arithmetic, no AI.
+  const SHELF_EAT = (p) => p.shelf !== 'cook'; // raw ingredients are not suggested as a snack
+  function suggestAmount(p, m, left) {
+    const isPortion = p.basis === 'portion';
+    if (!(p.kcal > 0) || !(p[m] > 0)) return null;
+    if (isPortion) {
+      let n = Math.min(2, Math.floor((left.kcal / p.kcal) * 2) / 2);
+      if (p.fridge_qty > 0) n = Math.min(n, p.fridge_qty);
+      if (n < 0.5) return null;
+      return { portions: n, kcal: p.kcal * n, gain: p[m] * n, label: n === 1 ? '1 порция' : `${qty(n)} порц.` };
+    }
+    let g = Math.min((left[m] / p[m]) * 100, (left.kcal / p.kcal) * 100, 400);
+    if (p.fridge_qty > 0) g = Math.min(g, p.fridge_qty);
+    g = Math.floor(g / 10) * 10;
+    if (g < 20) return null;
+    return { grams: g, kcal: (p.kcal * g) / 100, gain: (p[m] * g) / 100, label: `${g} г` };
+  }
+  function renderLeft(d) {
+    const box = $('#left-card');
+    const left = Object.fromEntries(MACROS.map((m) => [m, Math.max(0, d.left[m])]));
+    if (state.date !== state.today || !d.goals.kcal) { box.innerHTML = ''; return; }
+    if (left.kcal < 60) {
+      box.innerHTML = `<div class="card left-card done"><b>Норма на сегодня закрыта</b><span>${d.totals.kcal > d.goals.kcal ? `сверх нормы ${fmt(d.totals.kcal - d.goals.kcal)} ккал` : 'осталось меньше 60 ккал'}</span></div>`;
+      return;
+    }
+    const open = (m) => (d.goals[m] ? left[m] / d.goals[m] : 0);
+    const auto = open('protein') >= open('carbs') ? 'protein' : 'carbs';
+    const m = state.leftFocus || auto;
+    const pool = state.products.filter((p) => SHELF_EAT(p) && (state.leftAll || p.fridge_qty > 0));
+    const picks = pool.map((p) => ({ p, a: suggestAmount(p, m, left) })).filter((x) => x.a)
+      .sort((a, b) => kcalShare(b.p, m) - kcalShare(a.p, m)).slice(0, 5);
+    const word = { protein: 'белка', carbs: 'углеводов', fat: 'жиров' };
+    box.innerHTML = `<div class="card left-card">
+        <div class="lc-head"><b>Осталось на сегодня</b><span><b>${fmt(left.kcal)}</b> ккал</span></div>
+        <div class="lc-macros">${['protein', 'fat', 'carbs'].map((k) => `<span class="${k === m ? 'on' : ''}"><i class="dot ${k}"></i>${MACRO_SHORT[k]} ${fmt(left[k])} г</span>`).join('')}</div>
+        <div class="lc-note">${state.leftFocus ? 'Показываю' : 'Меньше всего добрано'} ${word[m]}, вот что ${state.leftFocus ? 'богаче всего им' : 'поможет'}:</div>
+        <div class="lc-focus">${['protein', 'carbs', 'fat'].map((k) => `<button type="button" data-f="${k}" class="${k === m ? 'on' : ''}"><i class="dot ${k}"></i>${MACRO_LABELS[k]}</button>`).join('')}</div>
+        <div class="lc-list">${picks.map((x, i) => `<button type="button" class="lc-item" data-i="${i}">
+            <span class="grow"><span class="name">${esc(x.p.name)}</span><span class="sub">${x.a.label} · ${fmt(x.a.kcal)} ккал</span></span>
+            <span class="gain ${m}">+${fmt(x.a.gain)} г ${MACRO_SHORT[m]}</span></button>`).join('')
+          || `<p class="muted">${state.leftAll ? 'Ничего не влезает в остаток.' : 'В холодильнике нет подходящего.'}</p>`}</div>
+        <button type="button" data-all class="lc-src">${state.leftAll ? 'Показать только то, что в холодильнике' : 'Искать по всему справочнику'}</button>
+      </div>`;
+    $$('[data-f]', box).forEach((b) => b.addEventListener('click', () => { state.leftFocus = b.dataset.f === auto ? null : b.dataset.f; renderLeft(d); }));
+    $('[data-all]', box).addEventListener('click', () => { state.leftAll = !state.leftAll; renderLeft(d); });
+    $$('.lc-item', box).forEach((b) => b.addEventListener('click', () => { const x = picks[Number(b.dataset.i)]; quickLog(x.p, null, x.a); }));
   }
 
   function renderHero(d) {
@@ -405,65 +448,165 @@
     } else p.textContent = '';
   }
 
-  // add sheet: pick from the fridge / catalogue, or type a meal by hand
+  // add sheet: tick several foods from the fridge / catalogue or from recent entries, set each amount and
+  // log them all at once; or type a meal by hand
+  function defaultAmount(p) {
+    if (p.basis === 'portion') return { portions: 1 };
+    return { grams: p.grams ? Number(p.grams) : 100 };
+  }
+  const amountMacros = (p, a) => {
+    const k = p.basis === 'portion' ? (a.portions != null ? a.portions : (a.grams || 0) / (p.grams || 1)) : (a.grams || 0) / 100;
+    return Object.fromEntries(MACROS.map((m) => [m, p[m] * k]));
+  };
+
   function openAddSheet(slot) {
     slot = slot || slotForHour(new Date().getHours());
     const dayNote = state.date === state.today ? '' : ` · ${dateTitle(state.date).toLowerCase()}`;
+    const picked = new Map();   // product id -> {grams} | {portions}
+    const pickedRecent = new Set();
+    let sort = 'default', recent = null;
     openModal(`
       <h3>${SLOT_ONE[slot]}${dayNote}</h3>
-      <div class="seg small" id="add-tabs"><button data-t="pick" class="on">Из холодильника</button><button data-t="recent">Недавнее</button><button data-t="manual">Вручную</button></div>
+      <div class="seg small" id="add-tabs"><button data-t="pick" class="on">Продукты</button><button data-t="recent">Недавнее</button><button data-t="manual">Вручную</button></div>
       <div id="add-pick">
         <input type="search" id="add-search" placeholder="Поиск по справочнику" autocomplete="off">
+        ${sortChips('add-sort', sort)}
+        <p class="hint">Отметь всё, что съела, и поправь количество. Запишется одним нажатием.</p>
         <div class="pick-list" id="add-list"></div>
       </div>
-      <div id="add-recent" hidden><div class="pick-list" id="recent-list"><p class="muted">Загружаю…</p></div></div>
+      <div id="add-recent" hidden><div id="copy-slot"></div><div class="pick-list" id="recent-list"><p class="muted">Загружаю…</p></div></div>
       <form class="form" id="add-manual" hidden>
         <label>Название <input name="name" required></label>
         <div class="row2"><label>Время <input name="time" type="time" value="${state.date === state.today ? nowHM() : '12:00'}"></label>
           <label>Приём <select name="slot">${SLOTS.map((s) => `<option value="${s}" ${s === slot ? 'selected' : ''}>${SLOT_ONE[s]}</option>`).join('')}</select></label></div>
         <div class="row2"><label>Ккал <input name="kcal" type="number" inputmode="decimal" step="any" required></label>
           <label>Вес, г <input name="grams" type="number" inputmode="decimal" step="any"></label></div>
-        <div class="row2"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="0"></label>
+        <div class="row3"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="0"></label>
           <label>Жиры <input name="fat" type="number" inputmode="decimal" step="any" value="0"></label>
           <label>Углев. <input name="carbs" type="number" inputmode="decimal" step="any" value="0"></label></div>
         <label>Состав <input name="description"></label>
         <button class="btn" type="submit">Записать</button>
-      </form>`, (el) => {
+      </form>
+      <div class="pick-bar" id="pick-bar" hidden><span id="pick-sum"></span><button class="btn" id="pick-save" type="button">Записать</button></div>`, (el) => {
+      let tab = 'pick';
       $$('#add-tabs button', el).forEach((b) => b.addEventListener('click', () => {
+        tab = b.dataset.t;
         $$('#add-tabs button', el).forEach((x) => x.classList.toggle('on', x === b));
-        $('#add-pick', el).hidden = b.dataset.t !== 'pick';
-        $('#add-recent', el).hidden = b.dataset.t !== 'recent';
-        $('#add-manual', el).hidden = b.dataset.t !== 'manual';
-        if (b.dataset.t === 'recent') renderRecent();
+        $('#add-pick', el).hidden = tab !== 'pick';
+        $('#add-recent', el).hidden = tab !== 'recent';
+        $('#add-manual', el).hidden = tab !== 'manual';
+        if (tab === 'recent') renderRecent();
+        renderBar();
       }));
-      // "repeat": the same dish as lately, copied with its macros (no fridge deduction)
-      let recent = null;
       const whenOf = () => `${state.date}T${state.date === state.today ? nowHM() : '12:00'}:00`;
+      const done = (n) => { closeModal(); toast(n > 1 ? `Записано: ${n} ${plural(n, 'позиция', 'позиции', 'позиций')}` : 'Записано'); state.goals = null; state.products = []; loadJournal(); };
+
+      // bottom bar: how many are ticked and their total
+      const renderBar = () => {
+        const bar = $('#pick-bar', el);
+        let n = 0; const tot = { kcal: 0, protein: 0, fat: 0, carbs: 0 };
+        if (tab === 'pick') {
+          for (const [id, a] of picked) { const p = state.products.find((x) => x.id === id); if (!p) continue; n++; const mm = amountMacros(p, a); for (const k of MACROS) tot[k] += mm[k]; }
+        } else if (tab === 'recent' && recent) {
+          for (const i of pickedRecent) { n++; for (const k of MACROS) tot[k] += recent[i][k]; }
+        }
+        bar.hidden = !n;
+        $('#pick-sum', el).innerHTML = `<b>${n} ${plural(n, 'позиция', 'позиции', 'позиций')}</b> · ${fmt(tot.kcal)} ккал<br><small>Б ${fmt(tot.protein)} · Ж ${fmt(tot.fat)} · У ${fmt(tot.carbs)}</small>`;
+      };
+      $('#pick-save', el).addEventListener('click', async (e) => {
+        const btn = e.currentTarget; btn.disabled = true;
+        try {
+          let n = 0;
+          if (tab === 'pick') {
+            for (const [id, a] of picked) {
+              const p = state.products.find((x) => x.id === id);
+              const body = { product_id: id, slot, when: whenOf() };
+              if (p.basis === 'portion') body.portions = a.portions != null ? a.portions : a.grams / p.grams; else body.grams = a.grams;
+              if (!(body.portions > 0 || body.grams > 0)) continue;
+              await api('/api/meals', { method: 'POST', body }); n++;
+            }
+          } else {
+            for (const i of pickedRecent) {
+              const m = recent[i];
+              await api('/api/meals', { method: 'POST', body: { name: m.name, description: m.description, grams: m.grams, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, slot, when: whenOf() } });
+              n++;
+            }
+          }
+          done(n);
+        } catch (err) { btn.disabled = false; toast(err.message); }
+      });
+
+      // "repeat": the same dishes as lately, copied with their macros (no fridge deduction)
       const renderRecent = async () => {
         const list = $('#recent-list', el);
         if (!recent) recent = (await api('/api/meals/recent')).meals;
-        list.innerHTML = recent.map((m, i) => { const t = mealTitle({ ...m, logged_at: m.last }); return `<button class="pick" data-i="${i}">
-            <span class="grow"><span class="name">${esc(t.title)}</span><span class="sub">${fmt(m.kcal)} ккал · Б ${fmt(m.protein)} · Ж ${fmt(m.fat)} · У ${fmt(m.carbs)}${m.grams ? ` · ${fmt(m.grams)} г` : ''} · ${shortDate(m.last.slice(0, 10))}${m.n > 1 ? `, ×${m.n}` : ''}</span></span>
-            <span class="chev">+</span></button>`; }).join('') || '<p class="muted">За три недели записей нет.</p>';
-        $$('.pick', list).forEach((b) => b.addEventListener('click', async () => {
-          const m = recent[Number(b.dataset.i)];
-          const body = { name: m.name, description: m.description, grams: m.grams, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, slot, when: whenOf() };
-          await api('/api/meals', { method: 'POST', body });
-          closeModal(); toast('Записано'); state.goals = null; loadJournal();
+        list.innerHTML = recent.map((m, i) => { const t = mealTitle({ ...m, logged_at: m.last }); return `<button class="pick ${pickedRecent.has(i) ? 'on' : ''}" data-i="${i}">
+            <span class="tick"></span>
+            <span class="grow"><span class="name">${esc(t.title)}</span><span class="sub">${fmt(m.kcal)} ккал · Б ${fmt(m.protein)} · Ж ${fmt(m.fat)} · У ${fmt(m.carbs)}${m.grams ? ` · ${fmt(m.grams)} г` : ''} · ${shortDate(m.last.slice(0, 10))}${m.n > 1 ? `, ×${m.n}` : ''}</span></span></button>`; }).join('') || '<p class="muted">За три недели записей нет.</p>';
+        $$('.pick', list).forEach((b) => b.addEventListener('click', () => {
+          const i = Number(b.dataset.i);
+          if (pickedRecent.has(i)) pickedRecent.delete(i); else pickedRecent.add(i);
+          b.classList.toggle('on', pickedRecent.has(i)); renderBar();
         }));
+        renderCopy();
       };
+      // FatSecret-style "copy meal": the same meal of the previous day with entries, one tap
+      const renderCopy = async () => {
+        const boxC = $('#copy-slot', el);
+        const prev = Object.keys(state.dayTotals).filter((dt) => dt < state.date).sort().pop();
+        if (!prev) return;
+        const pd = await api(`/api/day?date=${prev}`);
+        const items = pd.meals.filter((m) => (m.slot || 'snack') === slot);
+        if (!items.length) return;
+        const kc = items.reduce((a, m) => a + m.kcal, 0);
+        boxC.innerHTML = `<button class="copy-btn" type="button"><span class="grow"><b>${SLOT_ONE[slot]} как ${dateTitle(prev).toLowerCase() === 'вчера' ? 'вчера' : shortDate(prev)}</b>
+          <small>${items.length} ${plural(items.length, 'позиция', 'позиции', 'позиций')} · ${fmt(kc)} ккал</small></span><span class="chev">+</span></button>`;
+        $('.copy-btn', boxC).addEventListener('click', async (e) => {
+          e.currentTarget.disabled = true;
+          for (const m of items) {
+            await api('/api/meals', { method: 'POST', body: { name: m.name, description: m.description, grams: m.grams, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, slot, when: `${state.date}T${hmOf(m.logged_at)}:00` } });
+          }
+          done(items.length);
+        });
+      };
+
       const list = $('#add-list', el), search = $('#add-search', el);
       const render = () => {
         const q = search.value.trim().toLowerCase();
         let items = state.products;
         if (q) items = items.filter((p) => (p.name + ' ' + (p.aliases || '')).toLowerCase().includes(q));
         else items = [...items].sort((a, b) => (b.fridge_qty > 0) - (a.fridge_qty > 0) || (state.frequent.indexOf(a.id) + 1 || 99) - (state.frequent.indexOf(b.id) + 1 || 99));
-        list.innerHTML = items.slice(0, 40).map((p) => `<button class="pick" data-id="${p.id}">
-            <span class="grow"><span class="name">${esc(p.name)}</span><span class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${p.basis === 'portion' ? 'порцию' : '100 г'}${p.fridge_qty > 0 ? ` · <i>${qty(p.fridge_qty)} ${p.basis === 'portion' ? 'шт' : 'г'} есть</i>` : ''}</span></span>
-            <span class="chev">›</span></button>`).join('') || '<p class="muted">Ничего не нашлось. Добавь вручную.</p>';
-        $$('.pick', list).forEach((b) => b.addEventListener('click', () => quickLog(state.products.find((p) => p.id === Number(b.dataset.id)), slot)));
+        items = sortProducts(items, sort);
+        // ticked ones stay on top so they can be adjusted
+        items = [...items.filter((p) => picked.has(p.id)), ...items.filter((p) => !picked.has(p.id))];
+        list.innerHTML = items.slice(0, 60).map((p) => {
+          const a = picked.get(p.id);
+          return `<div class="pick ${a ? 'on' : ''}" data-id="${p.id}">
+            <span class="tick"></span>
+            <span class="grow"><span class="name">${esc(p.name)} ${sortBadge(p, sort)}</span><span class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${p.basis === 'portion' ? 'порцию' : '100 г'}${p.fridge_qty > 0 ? ` · <i>${qty(p.fridge_qty)} ${p.basis === 'portion' ? 'шт' : 'г'} есть</i>` : ''}</span></span>
+            ${a ? `<span class="amt"><input type="number" inputmode="decimal" step="any" min="0" value="${p.basis === 'portion' ? a.portions : a.grams}" aria-label="количество"><small>${p.basis === 'portion' ? 'порц.' : 'г'}</small></span>` : ''}
+          </div>`;
+        }).join('') || '<p class="muted">Ничего не нашлось. Добавь вручную.</p>';
+        $$('.pick', list).forEach((row) => {
+          const id = Number(row.dataset.id);
+          row.addEventListener('click', (e) => {
+            if (e.target.closest('.amt')) return;
+            const p = state.products.find((x) => x.id === id);
+            if (picked.has(id)) picked.delete(id); else picked.set(id, defaultAmount(p));
+            render(); renderBar();
+          });
+          const inp = row.querySelector('.amt input');
+          if (inp) inp.addEventListener('input', () => {
+            const p = state.products.find((x) => x.id === id), v = Number(inp.value) || 0;
+            picked.set(id, p.basis === 'portion' ? { portions: v } : { grams: v });
+            renderBar();
+          });
+        });
       };
       search.addEventListener('input', render);
+      $$('#add-sort button', el).forEach((b) => b.addEventListener('click', () => {
+        sort = b.dataset.s; $$('#add-sort button', el).forEach((x) => x.classList.toggle('on', x === b)); render();
+      }));
       render();
       $('#add-manual', el).addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -471,7 +614,7 @@
         const body = { name: f.name.value, kcal: f.kcal.value, grams: f.grams.value || null, protein: f.protein.value, fat: f.fat.value,
           carbs: f.carbs.value, description: f.description.value, slot: f.slot.value, when: `${state.date}T${f.time.value || '12:00'}:00` };
         await api('/api/meals', { method: 'POST', body });
-        closeModal(); toast('Записано'); state.goals = null; loadJournal();
+        done(1);
       });
     });
   }
@@ -487,7 +630,7 @@
           <label>Приём <select name="slot">${SLOTS.map((s) => `<option value="${s}" ${s === m.slot ? 'selected' : ''}>${SLOT_ONE[s]}</option>`).join('')}</select></label></div>
         <div class="row2"><label>Вес, г <input name="grams" type="number" inputmode="decimal" step="any" value="${m.grams ?? ''}"></label>
           <label>Ккал <input name="kcal" type="number" inputmode="decimal" step="any" value="${m.kcal}" required></label></div>
-        <div class="row2"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="${m.protein}"></label>
+        <div class="row3"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="${m.protein}"></label>
           <label>Жиры <input name="fat" type="number" inputmode="decimal" step="any" value="${m.fat}"></label>
           <label>Углев. <input name="carbs" type="number" inputmode="decimal" step="any" value="${m.carbs}"></label></div>
         <p class="muted" id="edit-hint" style="margin:2px 2px 0">${orig.grams ? 'Поменяешь вес, и КБЖУ пересчитаются сами.' : ''}</p>
@@ -519,104 +662,72 @@
     });
   }
 
-  // ---------- recommendations ----------
-  async function loadRecs() {
-    await loadDayTotals();
-    const d = await api(`/api/recs?date=${state.date}`);
-    state.serverToday = d.today;
-    const box = $('#recs');
-    box.innerHTML = '';
-    $('#recs-empty').hidden = d.plan.length > 0;
-    const locked = state.date < d.today && new Date().getHours() >= 7;
-    $('#regen').disabled = state.date < d.today;
-    $('#regen').textContent = d.plan.length ? 'Перегенерировать' : 'Собрать план';
-    const bySlot = {};
-    for (const r of d.plan) (bySlot[r.slot] = bySlot[r.slot] || []).push(r);
-    const tot = { kcal: 0, protein: 0, fat: 0, carbs: 0 };
-    for (const slot of SLOT_ORDER) {
-      const items = bySlot[slot];
-      if (!items) continue;
-      box.insertAdjacentHTML('beforeend', `<div class="slot">${esc(items[0].slot_title)}</div>`);
-      for (const r of items) {
-        for (const m in tot) tot[m] += r[m];
-        const div = document.createElement('div');
-        div.className = `rec ${r.done ? 'done' : ''} ${locked ? 'locked' : ''}`;
-        div.innerHTML = `<input type="checkbox" ${r.done ? 'checked' : ''} ${locked ? 'disabled' : ''}>
-          <div class="name"><div>${esc(r.name)}${flags(r)}</div>
-            <div class="sub muted">${fmt(r.portions, 1)} порц.${r.grams ? ` · ${fmt(r.grams)} г` : ''}${r.note ? ` · ${esc(r.note)}` : ''}</div></div>
-          <div class="macros"><b>${fmt(r.kcal)}</b> <span class="k">ккал</span>
-            <div class="mrow"><span><i class="dot protein"></i>${fmt(r.protein)}</span><span><i class="dot fat"></i>${fmt(r.fat)}</span><span><i class="dot carbs"></i>${fmt(r.carbs)}</span></div></div>`;
-        div.querySelector('input').addEventListener('change', async (e) => {
-          e.target.disabled = true;
-          try { await api(`/api/recs/${r.id}/toggle`, { method: 'POST' }); toast(e.target.checked ? 'Записано в журнал' : 'Отменено'); }
-          finally { loadRecs(); }
-        });
-        box.appendChild(div);
-      }
-    }
-    if (d.plan.length) {
-      box.insertAdjacentHTML('beforeend', `<p class="rec-total">План: ${fmt(tot.kcal)} ккал · Б ${fmt(tot.protein)} · Ж ${fmt(tot.fat)} · У ${fmt(tot.carbs)}</p>`);
-    }
-  }
-
-  $('#regen').addEventListener('click', () => openModal(`
-    <h3>План на ${dateTitle(state.date).toLowerCase()}</h3>
-    <form class="form" id="regen-form">
-      <label>Пожелание (необязательно) <input name="wish" placeholder="например: без молочного, лёгкий ужин"></label>
-      <button class="btn" type="submit">Собрать план</button>
-    </form>`, (el) => {
-    el.querySelector('form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = e.target.querySelector('button');
-      btn.disabled = true; btn.textContent = 'Думаю…';
-      try {
-        const r = await api('/api/recs/regenerate', { method: 'POST', body: { date: state.date, wish: e.target.wish.value } });
-        $('#rec-comment').textContent = r.comment || '';
-        closeModal(); loadRecs();
-      } catch (err) {
-        btn.disabled = false; btn.textContent = 'Собрать план';
-        let p = el.querySelector('.error'); if (!p) { p = document.createElement('p'); p.className = 'error'; e.target.appendChild(p); }
-        p.textContent = err.message;
-      }
-    });
-  }));
-
   // ---------- products + recipes ----------
-  // Products tab: «В холодильнике» (what is at home now + recipes) and «Съедено» (finished or never stocked,
-  // newest eaten first). Nothing is deleted when it runs out: "+" on an eaten item puts it back in the fridge.
+  // Products tab: «В холодильнике» split by shelves (my cooking, delivery, ready to eat, for cooking) and
+  // «Съедено» (finished or never stocked, newest eaten first). Nothing is deleted when it runs out:
+  // "+ в холодильник" on an eaten item puts it back. Recipes open as a separate full-screen page.
+  const SHELF_TITLES = { home: 'Моя готовка', delivery: 'Доставка', ready: 'Готовые продукты', cook: 'Для готовки' };
+  const SHELF_HINTS = { home: 'что приготовила сама', delivery: 'готовая еда из доставки', ready: 'можно съесть сразу', cook: 'продукты для готовки' };
+  const shelfOf = (p) => p.shelf || 'ready';
+
   async function loadProducts() {
     const q = $('#product-search').value.trim();
-    const [d, rr] = await Promise.all([api(`/api/products${q ? `?q=${encodeURIComponent(q)}` : ''}`), q ? { recipes: null } : api('/api/recipes')]);
-    state.products = d.products; state.frequent = d.frequent;
-    if (rr.recipes) state.recipes = rr.recipes;
-    renderQuick();
-    const box = $('#products');
+    const [d, rr] = await Promise.all([api(`/api/products${q ? `?q=${encodeURIComponent(q)}` : ''}`), api('/api/recipes')]);
+    if (!q) { state.products = d.products; state.frequent = d.frequent; }
+    state.recipes = rr.recipes;
+    const items = d.products;
+    const box = $('#products'), chips = $('#shelf-chips');
     box.innerHTML = '';
-    const fridge = d.products.filter((p) => p.fridge_qty > 0);
-    const eaten = d.products.filter((p) => !(p.fridge_qty > 0) && !(p.recipe_id && !q)); // recipes have their own section
+    const fridge = items.filter((p) => p.fridge_qty > 0);
+    const eaten = items.filter((p) => !(p.fridge_qty > 0));
     const seg = $('#prod-seg');
     seg.hidden = !!q;
     seg.querySelector('[data-v=fridge] small').textContent = q ? '' : fridge.length;
     seg.querySelector('[data-v=eaten] small').textContent = q ? '' : eaten.length;
     seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.prodView));
-    if (q || state.prodView === 'fridge') {
-      if (fridge.length) {
-        const tot = fridge.reduce((a, p) => a + (p.basis === 'portion' ? p.kcal * p.fridge_qty : p.kcal * p.fridge_qty / 100), 0);
-        box.insertAdjacentHTML('beforeend', `<div class="cat">В холодильнике <small>· ${fridge.length} ${plural(fridge.length, 'позиция', 'позиции', 'позиций')}, ${fmt(tot)} ккал</small></div>`);
-        fridge.forEach((p) => box.appendChild(productItem(p)));
-      } else if (!q) {
-        box.insertAdjacentHTML('beforeend', '<p class="empty">Холодильник пуст. Всё съеденное лежит во вкладке «Съедено», оттуда можно вернуть продукт кнопкой «+».</p>');
-      }
-      if (!q) renderRecipes(box);
-    }
+    const rb = $('#open-recipes');
+    const nDish = state.recipes.filter((r) => r.kind !== 'base').length, nBase = state.recipes.length - nDish;
+    rb.hidden = !!q;
+    rb.innerHTML = `<span class="rb-ico">📖</span><span class="grow"><b>Рецепты</b><small>${state.recipes.length ? `${nDish} ${plural(nDish, 'блюдо', 'блюда', 'блюд')}${nBase ? ` · ${nBase} ${plural(nBase, 'заготовка', 'заготовки', 'заготовок')}` : ''}` : 'пока пусто'}</small></span><span class="chev">›</span>`;
+    const fridgeView = !q && state.prodView === 'fridge';
+    // sort chips everywhere; shelf chips only for the fridge
+    const shelves = Object.keys(SHELF_TITLES).map((k) => [k, fridge.filter((p) => shelfOf(p) === k).length]);
+    chips.innerHTML = `${fridgeView ? `<div class="shelf-chips">${[['all', fridge.length], ...shelves].map(([k, n]) => `<button type="button" data-sh="${k}" class="${k === state.shelf ? 'on' : ''}">${k === 'all' ? 'Всё' : SHELF_TITLES[k]} <small>${n}</small></button>`).join('')}</div>` : ''}
+      ${sortChips('prod-sort', state.sort)}`;
+    $$('[data-sh]', chips).forEach((b) => b.addEventListener('click', () => { state.shelf = b.dataset.sh; loadProducts(); }));
+    $$('#prod-sort button', chips).forEach((b) => b.addEventListener('click', () => {
+      state.sort = b.dataset.s;
+      try { localStorage.setItem('sort', state.sort); } catch (_) { /* private mode */ }
+      loadProducts();
+    }));
+    const sorted = (arr) => sortProducts(arr, state.sort);
+    const kcalOf = (arr) => arr.reduce((a, p) => a + (p.basis === 'portion' ? p.kcal * p.fridge_qty : p.kcal * p.fridge_qty / 100), 0);
+
     if (q) {
-      if (eaten.length) box.insertAdjacentHTML('beforeend', '<div class="cat">Съедено и справочник</div>');
-      eaten.forEach((p) => box.appendChild(productItem(p)));
-      if (!d.products.length) box.innerHTML = '<p class="empty">Ничего не нашлось.</p>';
+      if (!items.length) { box.innerHTML = '<p class="empty">Ничего не нашлось.</p>'; return; }
+      sorted([...fridge, ...eaten]).forEach((p) => box.appendChild(productItem(p)));
       return;
     }
-    if (state.prodView !== 'eaten') return;
+    if (fridgeView) {
+      if (!fridge.length) {
+        box.innerHTML = '<p class="empty">Холодильник пуст. Всё съеденное лежит во вкладке «Съедено», оттуда можно вернуть продукт кнопкой «+ в холодильник».</p>';
+        return;
+      }
+      const keys = state.shelf === 'all' ? Object.keys(SHELF_TITLES) : [state.shelf];
+      for (const k of keys) {
+        const list = fridge.filter((p) => shelfOf(p) === k);
+        if (!list.length) {
+          if (state.shelf !== 'all') box.insertAdjacentHTML('beforeend', `<p class="empty">На полке «${SHELF_TITLES[k]}» пусто${k === 'cook' ? '. Пришли Claude фото заказа продуктов, и он разложит их сюда.' : '.'}</p>`);
+          continue;
+        }
+        box.insertAdjacentHTML('beforeend', `<div class="cat">${SHELF_TITLES[k]} <small>· ${list.length} · ${fmt(kcalOf(list))} ккал</small></div>`);
+        sorted(list).forEach((p) => box.appendChild(productItem(p)));
+      }
+      return;
+    }
     // eaten: grouped by the last day it was logged, newest first; never logged go last by category
+    if (!eaten.length) { box.innerHTML = '<p class="empty">Здесь появится то, что закончилось в холодильнике.</p>'; return; }
+    if (state.sort !== 'default') { sorted(eaten).forEach((p) => box.appendChild(productItem(p))); return; }
     const byDay = {};
     const never = [];
     for (const p of eaten) (p.last_eaten ? (byDay[p.last_eaten] = byDay[p.last_eaten] || []) : never).push(p);
@@ -631,40 +742,28 @@
       box.insertAdjacentHTML('beforeend', `<div class="cat">${esc(c)} <small>· из справочника</small></div>`);
       cats[c].forEach((p) => box.appendChild(productItem(p)));
     }
-    if (!eaten.length) box.innerHTML = '<p class="empty">Здесь появится то, что закончилось в холодильнике.</p>';
   }
   $$('#prod-seg button').forEach((b) => b.addEventListener('click', () => {
     state.prodView = b.dataset.v;
     try { localStorage.setItem('prodView', state.prodView); } catch (_) { /* private mode */ }
     loadProducts();
   }));
-
-  function renderQuick() {
-    const q = $('#quick');
-    const items = state.frequent.map((id) => state.products.find((p) => p.id === id)).filter(Boolean);
-    q.innerHTML = items.length ? `<div class="quick">${items.map((p) => `<button data-id="${p.id}">+ ${esc(p.name)}</button>`).join('')}</div>` : '';
-    $$('button', q).forEach((b) => b.addEventListener('click', () => quickLog(state.products.find((p) => p.id === Number(b.dataset.id)))));
-  }
+  $('#open-recipes').addEventListener('click', () => openRecipes());
 
   function productItem(p) {
     const unit = p.basis === 'portion' ? 'шт' : 'г';
     const step = p.basis === 'portion' ? 1 : 100;
-    const per = p.basis === 'portion' ? `порция${p.grams ? ` ${fmt(p.grams)} г` : ''}` : '100 г';
+    const per = p.basis === 'portion' ? `порцию${p.grams ? ` ${fmt(p.grams)} г` : ''}` : '100 г';
     const el = document.createElement('div');
-    el.className = 'item three';
+    el.className = `item prod ${p.urgent ? 'urgent' : ''}`;
     el.innerHTML = `
-      <div class="actions">
-        <button class="alt" data-act="log">Съела</button>
-        <button class="warn" data-act="urgent">${p.urgent ? 'Не срочно' : 'Срочно'}</button>
-        <button data-act="del">Удалить</button>
-      </div>
       <div class="row">
-        <div class="grow"><div class="name">${esc(p.name)}<span class="flags">${flags(p)}</span></div>
-          <div class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${per}</div></div>
-        <div class="side">
-          ${p.fridge_qty > 0 ? `<div class="qty"><button data-d="-${step}">−</button><span>${qty(p.fridge_qty)} ${unit}</span><button data-d="${step}">+</button></div>`
+        <div class="ptop"><div class="name">${esc(p.name)}<span class="flags">${flags(p)}</span></div>${sortBadge(p, state.sort)}</div>
+        <div class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${per}</div>
+        <div class="pbot">
+          ${p.fridge_qty > 0 ? `<div class="qty"><button data-d="-${step}" aria-label="меньше">−</button><span>${qty(p.fridge_qty)} ${unit}</span><button data-d="${step}" aria-label="больше">+</button></div>`
             : `<button class="back" data-act="back">+ в холодильник</button>`}
-          <button class="eat" data-act="eat">Съела</button>
+          ${shelfOf(p) === 'cook' ? '' : '<button class="eat" data-act="eat">Съела</button>'}
         </div>
       </div>`;
     $$('.qty button', el).forEach((b) => b.addEventListener('click', async (e) => {
@@ -679,27 +778,18 @@
       await api(`/api/products/${p.id}/fridge`, { method: 'POST', body: { delta: step } });
       toast(`«${p.name}» снова в холодильнике`); loadProducts();
     });
-    el.querySelector('[data-act=log]').addEventListener('click', () => quickLog(p));
-    el.querySelector('[data-act=eat]').addEventListener('click', (e) => { e.stopPropagation(); quickLog(p); });
-    el.querySelector('[data-act=urgent]').addEventListener('click', async () => {
-      await api(`/api/products/${p.id}/flags`, { method: 'POST', body: { urgent: !p.urgent } });
-      loadProducts();
-    });
-    el.querySelector('[data-act=del]').addEventListener('click', async () => {
-      if (!confirm(`Удалить «${p.name}» из справочника?`)) return;
-      await api(`/api/products/${p.id}`, { method: 'DELETE' });
-      toast('Удалено'); loadProducts();
-    });
-    el.querySelector('.row').addEventListener('click', () => {
-      if (p.recipe_id) { const r = (state.recipes || []).find((x) => x.id === p.recipe_id); if (r) return openRecipeEditor(r); }
+    const eat = el.querySelector('[data-act=eat]');
+    if (eat) eat.addEventListener('click', (e) => { e.stopPropagation(); quickLog(p); });
+    el.querySelector('.row').addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      if (p.recipe_id) { const r = (state.recipes || []).find((x) => x.id === p.recipe_id); if (r) return openRecipes(r); }
       editProduct(p);
     });
-    swipeable(el);
     return el;
   }
 
   // log a catalogue product in any amount: grams or portions, linked both ways when the portion weight is known
-  function quickLog(p, slot) {
+  function quickLog(p, slot, preset) {
     if (!p) return;
     const isPortion = p.basis === 'portion';
     const pg = Number(p.grams) || 0;           // weight of one portion (may be unknown)
@@ -714,12 +804,12 @@
       <div class="quick" id="amount-chips">${chips.join('')}</div>
       <form class="form" id="log-form">
         <div class="row2">
-          ${isPortion || both ? `<label>Порций <input name="portions" type="number" inputmode="decimal" step="any" min="0" value="${isPortion ? 1 : ''}"></label>` : ''}
-          ${!isPortion || both ? `<label>Граммов <input name="grams" type="number" inputmode="decimal" step="any" min="0" value="${isPortion ? (pg || '') : (pg || 100)}"></label>` : ''}
+          ${isPortion || both ? `<label>Порций <input name="portions" type="number" inputmode="decimal" step="any" min="0" value="${preset && preset.portions ? preset.portions : preset && preset.grams && both ? fmt(preset.grams / pg, 2) : isPortion ? 1 : ''}"></label>` : ''}
+          ${!isPortion || both ? `<label>Граммов <input name="grams" type="number" inputmode="decimal" step="any" min="0" value="${preset && preset.grams ? preset.grams : preset && preset.portions && both ? fmt(preset.portions * pg) : isPortion ? (pg || '') : (pg || 100)}"></label>` : ''}
         </div>
         <div class="row2"><label>Время <input name="time" type="time" value="${state.date === state.today ? nowHM() : '12:00'}"></label>
           <label>Приём <select name="slot">${SLOTS.map((s) => `<option value="${s}" ${s === slot ? 'selected' : ''}>${SLOT_ONE[s]}</option>`).join('')}</select></label></div>
-        <p class="muted" id="amount-preview" style="margin:4px 2px 0"></p>
+        <div class="preview" id="amount-preview"></div>
         <button class="btn" type="submit">Записать в журнал</button>
       </form>`, (el) => {
       const f = el.querySelector('form');
@@ -733,8 +823,15 @@
         const a = amount();
         const factor = isPortion ? a.portions : a.grams / 100;
         const v = (k) => fmt(p[k] * factor);
+        // as in FatSecret: share of the daily norm, and what stays open after this entry (today only)
+        const g = state.goals || (state.day && state.day.goals) || {};
+        const day = state.day && state.day.date === state.date ? state.day : null;
+        const after = day ? Object.fromEntries(MACROS.map((k) => [k, (day.left[k] || 0) - p[k] * factor])) : null;
         el.querySelector('#amount-preview').innerHTML = factor > 0
-          ? `Будет записано: <b>${v('kcal')} ккал</b> · Б ${v('protein')} · Ж ${v('fat')} · У ${v('carbs')}${a.grams ? ` · ${fmt(a.grams)} г` : ''}`
+          ? `<div>Будет записано: <b>${v('kcal')} ккал</b> · Б ${v('protein')} · Ж ${v('fat')} · У ${v('carbs')}${a.grams ? ` · ${fmt(a.grams)} г` : ''}</div>
+             ${g.kcal ? `<div class="pv-bars">${MACROS.map((k) => `<span><i class="${k}" style="width:${Math.min(100, (100 * p[k] * factor) / (g[k] || 1)).toFixed(0)}%"></i></span><em>${Math.round((100 * p[k] * factor) / (g[k] || 1))}%</em>`).join('')}</div>
+             <small>доля дневной нормы: ккал · Б · Ж · У</small>` : ''}
+             ${after ? `<div class="pv-after">После останется: <b>${fmt(after.kcal)} ккал</b> · Б ${fmt(after.protein)} · Ж ${fmt(after.fat)} · У ${fmt(after.carbs)}</div>` : ''}`
           : 'Укажи количество';
       };
       // typing in one field recalculates the other
@@ -762,25 +859,29 @@
 
   function editProduct(p) {
     const isNew = !p;
-    p = p || { basis: 'portion', kcal: 0, protein: 0, fat: 0, carbs: 0 };
+    p = p || { basis: 'portion', kcal: 0, protein: 0, fat: 0, carbs: 0, shelf: state.shelf !== 'all' ? state.shelf : 'ready' };
     openModal(`
       <h3>${isNew ? 'Новый продукт' : 'Продукт'}</h3>
       <form class="form" id="product-form">
         <label>Название <input name="name" value="${esc(p.name || '')}" required></label>
+        <label>Полка в холодильнике
+          <select name="shelf">${Object.entries(SHELF_TITLES).map(([k, t]) => `<option value="${k}" ${shelfOf(p) === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
         <label>Значения указаны
           <select name="basis"><option value="portion" ${p.basis === 'portion' ? 'selected' : ''}>на порцию</option>
             <option value="100g" ${p.basis === '100g' ? 'selected' : ''}>на 100 г</option></select></label>
         <div class="row2"><label>Ккал <input name="kcal" type="number" inputmode="decimal" step="any" value="${p.kcal}"></label>
           <label>Вес порции, г <input name="grams" type="number" inputmode="decimal" step="any" value="${p.grams ?? ''}"></label></div>
-        <div class="row2"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="${p.protein}"></label>
+        <div class="row3"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="${p.protein}"></label>
           <label>Жиры <input name="fat" type="number" inputmode="decimal" step="any" value="${p.fat}"></label>
           <label>Углев. <input name="carbs" type="number" inputmode="decimal" step="any" value="${p.carbs}"></label></div>
         <div class="row2"><label>Категория <input name="category" value="${esc(p.category || '')}"></label>
           <label>Синонимы <input name="aliases" value="${esc(p.aliases || '')}"></label></div>
-        <div class="row2"><label class="chk"><input type="checkbox" name="lactose" ${p.lactose ? 'checked' : ''}> 🥛 лактоза</label>
-          <label class="chk"><input type="checkbox" name="sugar" ${p.sugar ? 'checked' : ''}> 🍬 сахар</label></div>
+        <div class="checks"><label class="chk"><input type="checkbox" name="lactose" ${p.lactose ? 'checked' : ''}> 🥛 лактоза</label>
+          <label class="chk"><input type="checkbox" name="sugar" ${p.sugar ? 'checked' : ''}> 🍬 сахар</label>
+          ${isNew ? '' : `<label class="chk"><input type="checkbox" name="urgent" ${p.urgent ? 'checked' : ''}> ⏰ съесть срочно</label>`}</div>
         ${isNew ? '<label>Сразу в холодильник (шт или г) <input name="fridge_add" type="number" inputmode="decimal" value="0"></label>' : ''}
         <button class="btn" type="submit">Сохранить</button>
+        ${isNew ? '' : '<button class="btn ghost danger" type="button" id="p-del">Удалить из справочника</button>'}
       </form>`, (el) => {
       el.querySelector('form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -788,11 +889,18 @@
         const body = {
           name: f.name.value, basis: f.basis.value, kcal: f.kcal.value, grams: f.grams.value || null,
           protein: f.protein.value, fat: f.fat.value, carbs: f.carbs.value, category: f.category.value,
-          aliases: f.aliases.value, lactose: f.lactose.checked, sugar: f.sugar.checked,
+          aliases: f.aliases.value, lactose: f.lactose.checked, sugar: f.sugar.checked, shelf: f.shelf.value,
           fridge_add: f.fridge_add ? f.fridge_add.value : 0,
         };
         await api('/api/products', { method: 'POST', body });
-        closeModal(); toast('Сохранено'); loadProducts();
+        if (f.urgent && f.urgent.checked !== !!p.urgent) await api(`/api/products/${p.id}/flags`, { method: 'POST', body: { urgent: f.urgent.checked } });
+        closeModal(); toast('Сохранено'); state.products = []; loadProducts();
+      });
+      const del = $('#p-del', el);
+      if (del) del.addEventListener('click', async () => {
+        if (!confirm(`Удалить «${p.name}» из справочника?`)) return;
+        await api(`/api/products/${p.id}`, { method: 'DELETE' });
+        closeModal(); toast('Удалено'); state.products = []; loadProducts();
       });
     });
   }
@@ -806,23 +914,110 @@
   let searchTimer;
   $('#product-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadProducts, 250); });
 
-  // ----- recipes -----
-  function renderRecipes(box) {
-    const rs = state.recipes || [];
-    box.insertAdjacentHTML('beforeend', `<div class="cat">Рецепты <button class="link" id="new-recipe">+ новый</button></div>`);
-    $('#new-recipe', box).addEventListener('click', () => openRecipeEditor(null));
-    if (!rs.length) { box.insertAdjacentHTML('beforeend', '<p class="muted" style="margin:0 2px 6px">Рецепт = блюдо из ингредиентов с весом до и после готовки. Сохранённый рецепт попадает в справочник «на 100 г готового», и съеденное считается по граммам.</p>'); return; }
-    for (const r of rs) {
-      const el = document.createElement('div');
-      el.className = 'item recipe';
-      el.innerHTML = `<div class="row">
-        <div class="grow"><div class="name">${esc(r.name)}</div>
-          <div class="sub">${fmt(r.per100.kcal)} ккал · Б ${fmt(r.per100.protein)} · Ж ${fmt(r.per100.fat)} · У ${fmt(r.per100.carbs)} на 100 г готового · всего ${fmt(r.cooked_grams)} г${r.fridge_qty > 0 ? ` · <i>в холодильнике ${qty(r.fridge_qty)} г</i>` : ''}</div></div>
-        <div class="side"><button class="eat" data-act="eat">Съела</button></div></div>`;
-      el.querySelector('[data-act=eat]').addEventListener('click', (e) => { e.stopPropagation(); const p = state.products.find((x) => x.id === r.product_id); p && quickLog(p); });
-      el.querySelector('.row').addEventListener('click', () => openRecipeEditor(r));
-      box.appendChild(el);
-    }
+  // ----- recipes: a separate full-screen page with the list and each recipe's card -----
+  const page = $('#page');
+  let pageBack = null;
+  function openPage(title, html, onMount, back) {
+    $('#page-title').textContent = title;
+    $('#page-body').innerHTML = html;
+    $('#page-act').innerHTML = '';
+    pageBack = back || null;
+    page.hidden = false;
+    document.body.classList.add('page-open');
+    page.scrollTop = 0;
+    onMount && onMount($('#page-body'));
+  }
+  function closePage() { page.hidden = true; document.body.classList.remove('page-open'); $('#page-body').innerHTML = ''; }
+  $('#page-back').addEventListener('click', () => (pageBack ? pageBack() : closePage()));
+
+  let recipeKind = 'dish', recipeQuery = '';
+  async function openRecipes(r) {
+    if (!state.products.length) await loadProductsCache(true);
+    if (!state.recipes || !state.recipes.length) state.recipes = (await api('/api/recipes')).recipes;
+    if (r) return openRecipeCard(r, true);
+    const rs = state.recipes;
+    openPage('Рецепты', `
+      <input type="search" id="rcp-search" placeholder="Найти рецепт или ингредиент" autocomplete="off" value="${esc(recipeQuery)}">
+      <div class="seg small" id="rcp-kind"><button data-k="dish">Блюда <small>${rs.filter((x) => x.kind !== 'base').length}</small></button><button data-k="base">Заготовки <small>${rs.filter((x) => x.kind === 'base').length}</small></button></div>
+      <p class="hint" id="rcp-hint"></p>
+      <div id="rcp-list"></div>`, (el) => {
+      $('#page-act').innerHTML = '<button class="page-new" id="rcp-new">+ новый</button>';
+      $('#rcp-new').addEventListener('click', () => openRecipeEditor(null));
+      const render = () => {
+        $$('#rcp-kind button', el).forEach((b) => b.classList.toggle('on', b.dataset.k === recipeKind));
+        $('#rcp-hint', el).textContent = recipeKind === 'base'
+          ? 'Заготовки — то, что готовится партией и идёт в блюда: блины, курица, отварная крупа. КБЖУ на 100 г готового.'
+          : 'Блюда — готовые порции. Нажми на блюдо, чтобы увидеть состав и записать его.';
+        const q = recipeQuery.trim().toLowerCase();
+        const list = rs.filter((x) => (x.kind === 'base') === (recipeKind === 'base'))
+          .filter((x) => !q || (x.name + ' ' + x.items.map((i) => i.name).join(' ')).toLowerCase().includes(q))
+          .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+        const box = $('#rcp-list', el);
+        box.innerHTML = list.map((x) => {
+          const p = state.products.find((pp) => pp.id === x.product_id);
+          const portion = p && p.basis === 'portion';
+          const t = x.totals;
+          const share = (k) => { const tt = t.protein * 4 + t.fat * 9 + t.carbs * 4 || 1; return (t[k] * (k === 'fat' ? 9 : 4) * 100) / tt; };
+          return `<button class="rcp card" data-id="${x.id}">
+            <span class="rcp-top"><b>${esc(x.name)}</b>${p && p.fridge_qty > 0 ? `<i class="in">в холодильнике</i>` : ''}</span>
+            <span class="rcp-sub">${portion || x.kind !== 'base'
+              ? `<b>${fmt(t.kcal)}</b> ккал · Б ${fmt(t.protein)} · Ж ${fmt(t.fat)} · У ${fmt(t.carbs)} · ${fmt(x.cooked_grams)} г`
+              : `<b>${fmt(x.per100.kcal)}</b> ккал · Б ${fmt(x.per100.protein, 1)} · Ж ${fmt(x.per100.fat, 1)} · У ${fmt(x.per100.carbs, 1)} на 100 г`}</span>
+            <span class="share">${['protein', 'fat', 'carbs'].map((k) => `<i class="${k}" style="width:${share(k).toFixed(1)}%"></i>`).join('')}</span>
+            <span class="rcp-ing">${esc(x.items.map((i) => i.name.replace(/\s*\(.*?\)\s*/g, ' ').trim()).join(', '))}</span>
+          </button>`;
+        }).join('') || `<p class="empty">${q ? 'Ничего не нашлось.' : 'Пока пусто. Нажми «+ новый» или пришли Claude фото готовки.'}</p>`;
+        $$('.rcp', box).forEach((b) => b.addEventListener('click', () => openRecipeCard(rs.find((x) => x.id === Number(b.dataset.id)))));
+      };
+      $$('#rcp-kind button', el).forEach((b) => b.addEventListener('click', () => { recipeKind = b.dataset.k; render(); }));
+      $('#rcp-search', el).addEventListener('input', (e) => { recipeQuery = e.target.value; render(); });
+      render();
+    });
+  }
+
+  function openRecipeCard(r, direct) {
+    const p = state.products.find((x) => x.id === r.product_id);
+    const portion = p && p.basis === 'portion';
+    const t = r.totals, h = r.per100;
+    const g300 = h.kcal ? (300 * 100) / h.kcal : 0, g400 = h.kcal ? (400 * 100) / h.kcal : 0;
+    openPage(r.kind === 'base' ? 'Заготовка' : 'Блюдо', `
+      <h2 class="rc-title">${esc(r.name)}</h2>
+      <div class="card rc-tot">
+        <div class="rc-k"><b>${fmt(t.kcal)}</b><span>ккал всё блюдо</span></div>
+        <div class="rc-m">${['protein', 'fat', 'carbs'].map((k) => `<span><i class="dot ${k}"></i><b>${fmt(t[k])}</b> г<small>${MACRO_LABELS[k].toLowerCase()}</small></span>`).join('')}</div>
+        <div class="rc-foot">Готовое ${fmt(r.cooked_grams)} г${r.raw_grams && Math.abs(r.raw_grams - r.cooked_grams) > 1 ? ` · сырые ингредиенты ${fmt(r.raw_grams)} г` : ''}</div>
+      </div>
+      <div class="rc-facts">
+        <div><span>На 100 г готового</span><b>${fmt(h.kcal)} ккал</b> · Б ${fmt(h.protein, 1)} · Ж ${fmt(h.fat, 1)} · У ${fmt(h.carbs, 1)}</div>
+        ${h.kcal ? `<div><span>Сколько съесть</span>на 300 ккал <b>${fmt(g300)} г</b> · на 400 ккал <b>${fmt(g400)} г</b></div>` : ''}
+        ${p && p.fridge_qty > 0 ? `<div><span>В холодильнике</span><b>${qty(p.fridge_qty)} ${portion ? 'шт' : 'г'}</b></div>` : ''}
+      </div>
+      <div class="cat">Состав</div>
+      <ul class="card rc-items">${r.items.map((i) => `<li><span class="grow"><span class="name">${esc(i.name)}</span>${i.note ? `<span class="note">${esc(i.note)}</span>` : ''}
+          <span class="sub">${fmt(i.kcal)} ккал · Б ${fmt(i.protein, 1)} · Ж ${fmt(i.fat, 1)} · У ${fmt(i.carbs, 1)}</span></span><b>${fmt(i.grams)} г</b></li>`).join('')}</ul>
+      ${r.note ? `<p class="muted">${esc(r.note)}</p>` : ''}
+      <div class="rc-actions">
+        ${p ? '<button class="btn" id="rc-eat">Съела</button>' : ''}
+        ${p && !/ильнур/i.test(r.name) ? `<button class="btn ghost" id="rc-fridge">+ в холодильник</button>` : ''}
+        <button class="btn ghost" id="rc-edit">Изменить рецепт</button>
+      </div>`, (el) => {
+      const eat = $('#rc-eat', el);
+      if (eat) eat.addEventListener('click', () => quickLog(p));
+      const fr = $('#rc-fridge', el);
+      if (fr) fr.addEventListener('click', async () => {
+        await api(`/api/products/${p.id}/fridge`, { method: 'POST', body: { delta: portion ? 1 : r.cooked_grams } });
+        state.products = []; await loadProductsCache(true);
+        toast(`«${r.name}» в холодильнике`); openRecipeCard(r, direct);
+      });
+      $('#rc-edit', el).addEventListener('click', () => openRecipeEditor(r));
+    }, direct ? null : () => openRecipes());
+  }
+
+  async function afterRecipeChange(saved) {
+    await loadProductsCache(true);
+    state.recipes = (await api('/api/recipes')).recipes;
+    if (!page.hidden) { if (saved) openRecipeCard(saved); else openRecipes(); }
+    if (state.tab === 'products') loadProducts();
   }
 
   // ingredient line -> absolute macros for its grams
@@ -839,12 +1034,13 @@
   function openRecipeEditor(r) {
     const lines = (r ? r.items : []).map((it) => {
       const p = it.product_id ? state.products.find((x) => x.id === it.product_id) : null;
-      return p ? { product: p, name: p.name, grams: it.grams } : { name: it.name, grams: it.grams, per: { kcal: it.grams ? it.kcal * 100 / it.grams : 0, protein: it.grams ? it.protein * 100 / it.grams : 0, fat: it.grams ? it.fat * 100 / it.grams : 0, carbs: it.grams ? it.carbs * 100 / it.grams : 0 } };
+      return p ? { product: p, name: p.name, grams: it.grams, note: it.note } : { name: it.name, note: it.note, grams: it.grams, per: { kcal: it.grams ? it.kcal * 100 / it.grams : 0, protein: it.grams ? it.protein * 100 / it.grams : 0, fat: it.grams ? it.fat * 100 / it.grams : 0, carbs: it.grams ? it.carbs * 100 / it.grams : 0 } };
     });
     openModal(`
       <h3>${r ? 'Рецепт' : 'Новый рецепт'}</h3>
       <form class="form" id="recipe-form">
         <label>Название <input name="name" value="${esc(r ? r.name : '')}" required placeholder="например: Плов с курицей"></label>
+        <label>Что это <select name="kind"><option value="dish">Блюдо: готовая порция</option><option value="base" ${r && r.kind === 'base' ? 'selected' : ''}>Заготовка: идёт в другие блюда</option></select></label>
         <div class="cat" style="margin-top:12px">Ингредиенты</div>
         <div id="rc-lines"></div>
         <div class="row2" style="margin-top:6px"><button type="button" class="btn ghost" id="rc-add-cat">+ из справочника</button><button type="button" class="btn ghost" id="rc-add-man">+ вручную</button></div>
@@ -852,7 +1048,7 @@
         <div id="rc-manual" hidden class="card" style="padding:10px;margin-top:8px">
           <label>Название <input id="rm-name"></label>
           <div class="row2"><label>Грамм <input id="rm-grams" type="number" inputmode="decimal" step="any"></label><label>Ккал на 100 г <input id="rm-kcal" type="number" inputmode="decimal" step="any"></label></div>
-          <div class="row2"><label>Б на 100 г <input id="rm-protein" type="number" inputmode="decimal" step="any" value="0"></label><label>Ж на 100 г <input id="rm-fat" type="number" inputmode="decimal" step="any" value="0"></label><label>У на 100 г <input id="rm-carbs" type="number" inputmode="decimal" step="any" value="0"></label></div>
+          <div class="row3"><label>Б на 100 г <input id="rm-protein" type="number" inputmode="decimal" step="any" value="0"></label><label>Ж на 100 г <input id="rm-fat" type="number" inputmode="decimal" step="any" value="0"></label><label>У на 100 г <input id="rm-carbs" type="number" inputmode="decimal" step="any" value="0"></label></div>
           <button type="button" class="btn ghost" id="rm-ok">Добавить ингредиент</button>
         </div>
         <div class="cat" style="margin-top:14px">Готовка</div>
@@ -918,17 +1114,17 @@
         $('#rc-manual', el).hidden = true; renderLines();
       });
       const payload = () => ({
-        name: f.name.value, cooked_grams: Number(f.cooked.value) || null, portion_grams: Number(f.portion.value) || null,
+        name: f.name.value, kind: f.kind.value, cooked_grams: Number(f.cooked.value) || null, portion_grams: Number(f.portion.value) || null,
         deduct: f.deduct.checked, to_fridge: f.to_fridge.checked,
-        items: lines.map((l) => { const m = lineMacros(l); return { product_id: l.product ? l.product.id : null, name: l.name, grams: Number(l.grams) || 0, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs }; }),
+        items: lines.map((l) => { const m = lineMacros(l); return { product_id: l.product ? l.product.id : null, name: l.name, note: l.note || '', grams: Number(l.grams) || 0, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs }; }),
       });
       const save = async (asNew) => {
         if (!lines.length) return toast('Добавь хотя бы один ингредиент');
         const body = payload();
         if (r && !asNew) body.id = r.id;
         if (asNew && r && body.name === r.name) body.name += ' (копия)';
-        await api('/api/recipes', { method: 'POST', body });
-        closeModal(); toast('Рецепт сохранён'); state.products = []; loadProducts();
+        const saved = (await api('/api/recipes', { method: 'POST', body })).recipe;
+        closeModal(); toast('Рецепт сохранён'); await afterRecipeChange(saved);
       };
       f.addEventListener('submit', (e) => { e.preventDefault(); save(false); });
       if (r) {
@@ -936,7 +1132,7 @@
         $('#rc-del', el).addEventListener('click', async () => {
           if (!confirm(`Удалить рецепт «${r.name}»?`)) return;
           await api(`/api/recipes/${r.id}`, { method: 'DELETE' });
-          closeModal(); toast('Удалено'); loadProducts();
+          closeModal(); toast('Удалено'); await afterRecipeChange(null);
         });
       }
       renderLines();
@@ -1591,7 +1787,10 @@
   state.date = state.today;
   let initial = 'journal';
   try { initial = localStorage.getItem('tab') || 'journal'; } catch (_) { /* ignore */ }
+  if (!TITLES[initial]) initial = 'journal';
   try { state.prodView = localStorage.getItem('prodView') || 'fridge'; } catch (_) { /* ignore */ }
+  try { state.sort = localStorage.getItem('sort') || 'default'; } catch (_) { /* ignore */ }
+  if (!SORTS[state.sort]) state.sort = 'default';
   showTab(initial);
   const fromPush = new URLSearchParams(location.search).has('checkin');
   if (fromPush) history.replaceState(null, '', '/');
