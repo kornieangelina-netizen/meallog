@@ -25,6 +25,7 @@
     sort: 'default',     // product order: default | protein | carbs | fat | kcal
     leftFocus: null,     // remainder card: null = auto (the least covered of protein / carbs)
     leftAll: false,      // remainder card: whole catalogue, not only the fridge
+    leftOpen: false,     // remainder card starts collapsed: only the totals line
     date: null,          // selected day, 'YYYY-MM-DD'
     today: null,         // local today, refreshed on wake
     firstDate: null,     // earliest diary day (calendar range start)
@@ -406,17 +407,22 @@
     const picks = pool.map((p) => ({ p, a: suggestAmount(p, m, left) })).filter((x) => x.a)
       .sort((a, b) => kcalShare(b.p, m) - kcalShare(a.p, m)).slice(0, 5);
     const word = { protein: 'белка', carbs: 'углеводов', fat: 'жиров' };
-    box.innerHTML = `<div class="card left-card">
-        <div class="lc-head"><b>Осталось на сегодня</b><span><b>${fmt(left.kcal)}</b> ккал</span></div>
-        <div class="lc-macros">${['protein', 'fat', 'carbs'].map((k) => `<span class="${k === m ? 'on' : ''}"><i class="dot ${k}"></i>${MACRO_SHORT[k]} ${fmt(left[k])} г</span>`).join('')}</div>
-        <div class="lc-note">${state.leftFocus ? 'Показываю' : 'Меньше всего добрано'} ${word[m]}, вот что ${state.leftFocus ? 'богаче всего им' : 'поможет'}:</div>
+    box.innerHTML = `<div class="card left-card ${state.leftOpen ? 'open' : ''}">
+        <button type="button" class="lc-toggle" aria-expanded="${state.leftOpen}">
+          <span class="lc-head"><b>Осталось на сегодня</b><span><b>${fmt(left.kcal)}</b> ккал</span></span>
+          <span class="lc-macros">${['protein', 'fat', 'carbs'].map((k) => `<span class="${k === m ? 'on' : ''}"><i class="dot ${k}"></i>${MACRO_SHORT[k]} ${fmt(left[k])} г</span>`).join('')}
+            <em>${state.leftOpen ? 'свернуть' : 'что съесть'}<i class="lc-chev">›</i></em></span>
+        </button>
+        ${state.leftOpen ? `<div class="lc-note">${state.leftFocus ? 'Показываю' : 'Меньше всего добрано'} ${word[m]}, вот что ${state.leftFocus ? 'богаче всего им' : 'поможет'}:</div>
         <div class="lc-focus">${['protein', 'carbs', 'fat'].map((k) => `<button type="button" data-f="${k}" class="${k === m ? 'on' : ''}"><i class="dot ${k}"></i>${MACRO_LABELS[k]}</button>`).join('')}</div>
         <div class="lc-list">${picks.map((x, i) => `<button type="button" class="lc-item" data-i="${i}">
             <span class="grow"><span class="name">${esc(x.p.name)}</span><span class="sub">${x.a.label} · ${fmt(x.a.kcal)} ккал</span></span>
             <span class="gain ${m}">+${fmt(x.a.gain)} г ${MACRO_SHORT[m]}</span></button>`).join('')
           || `<p class="muted">${state.leftAll ? 'Ничего не влезает в остаток.' : 'В холодильнике нет подходящего.'}</p>`}</div>
-        <button type="button" data-all class="lc-src">${state.leftAll ? 'Показать только то, что в холодильнике' : 'Искать по всему справочнику'}</button>
+        <button type="button" data-all class="lc-src">${state.leftAll ? 'Показать только то, что в холодильнике' : 'Искать по всему справочнику'}</button>` : ''}
       </div>`;
+    $('.lc-toggle', box).addEventListener('click', () => { state.leftOpen = !state.leftOpen; renderLeft(d); });
+    if (!state.leftOpen) return;
     $$('[data-f]', box).forEach((b) => b.addEventListener('click', () => { state.leftFocus = b.dataset.f === auto ? null : b.dataset.f; renderLeft(d); }));
     $('[data-all]', box).addEventListener('click', () => { state.leftAll = !state.leftAll; renderLeft(d); });
     $$('.lc-item', box).forEach((b) => b.addEventListener('click', () => { const x = picks[Number(b.dataset.i)]; quickLog(x.p, null, x.a); }));

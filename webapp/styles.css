@@ -538,3 +538,10 @@ body.page-open { overflow: hidden; }
 .sort-chips button { padding: 5px 10px; font-size: 12px; }
 .lc-src { display: block; width: 100%; border: 0; background: none; color: var(--accent); font-size: 12.5px; padding: 8px 0 0; text-align: left;
   border-top: 1px solid var(--line); margin-top: 2px; }
+.lc-toggle { display: block; width: 100%; border: 0; background: none; color: inherit; text-align: left; padding: 0; }
+.lc-toggle .lc-head { display: flex; }
+.lc-toggle .lc-macros { display: flex; align-items: center; margin-bottom: 0; }
+.lc-toggle em { margin-left: auto; font-style: normal; color: var(--accent); font-size: 12.5px; display: inline-flex; align-items: center; gap: 4px; }
+.lc-chev { font-style: normal; font-size: 16px; line-height: 1; transform: rotate(90deg); transition: transform .15s; }
+.left-card.open .lc-chev { transform: rotate(-90deg); }
+.left-card.open .lc-macros { margin-bottom: 8px; }
