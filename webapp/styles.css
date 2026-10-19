@@ -165,11 +165,11 @@ input[type=search], .form input, .form select, .login-box input { width: 100%; p
 input, select, textarea { font-size: 16px !important; }
 .form select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%238b95ae' stroke-width='1.6'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 12px center; padding-right: 30px; }
-.form input[type=time] { display: flex; align-items: center; }
+.form input[type=time] { line-height: 46px; }
 input:focus { border-color: var(--accent); }
 input[type=search] { margin-top: 12px; }
 .form label { display: block; font-size: 13px; color: var(--muted); margin-top: 8px; }
-.form label input { margin-top: 4px; }
+.form label input, .form label select { display: block; margin-top: 4px; }
 .form label .dot { margin-right: 6px; }
 .form { padding: 14px; margin: 12px 0 14px; }
 .form h3 { margin-top: 0; }
