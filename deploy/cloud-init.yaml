@@ -1,5 +1,5 @@
 #cloud-config
-# Paste this into the "Cloud config" field when creating the server in Hetzner Cloud.
+# Paste this into the cloud-init / user data field when creating the server (Vultr: "Cloud-Init User-Data").
 # Replace the three REPLACE_* values first (scripts/make_cloud_init.py does it for you).
 # The server installs MealLog on first boot and serves it at https://<ip-with-dashes>.sslip.io
 package_update: true

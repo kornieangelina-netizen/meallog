@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install or update MealLog on Ubuntu 24.04. Run as root from the checkout:
+# Install or update MealLog on Ubuntu 24.04+ (any cloud provider). Run as root from the checkout:
 #   git clone https://github.com/kornieangelina-netizen/meallog /opt/meallog && bash /opt/meallog/deploy/install.sh
 #
 # Domain: set DOMAIN=yourname.duckdns.org (or any domain pointing at this server). Without it the
@@ -41,6 +41,11 @@ ANTHROPIC_API_KEY=${API_KEY}
 EOF
   chmod 600 .env
   [ -f "$BOOT" ] && rm -f "$BOOT"
+fi
+
+# Some providers (Vultr, DigitalOcean images) ship Ubuntu with ufw on and only SSH open: open the web ports.
+if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+  ufw allow 80/tcp && ufw allow 443/tcp
 fi
 
 if [ -z "${DOMAIN:-}" ]; then
