@@ -8,12 +8,14 @@ One process, one SQLite file.
 """
 from __future__ import annotations
 
+import base64
 import hmac
 import logging
 import os
 from pathlib import Path
 
 import uvicorn
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
@@ -218,6 +220,29 @@ def log_measurements(chest: float | None = None, waist: float | None = None, hip
     with db.tx() as conn:
         m = db.log_measurements(conn, chest=chest, waist=waist, hips=hips, day=day)
     return {"measurements": m}
+
+
+PHOTO_IMPORT_DIR = Path(__file__).parent / "photos-import"
+
+
+@mcp.tool()
+def import_body_photos(key: str) -> dict:
+    """Перенести в приложение зашифрованные фото прогресса из папки photos-import репозитория.
+
+    key: ключ (hex), который знает только Claude. Файлы называются ГГГГ-ММ-ДД_N.bin. Повторный вызов
+    ничего не дублирует.
+    """
+    aes = AESGCM(bytes.fromhex(key.strip()))
+    days = set()
+    with db.tx() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM body_photos").fetchone()[0]
+        for f in sorted(PHOTO_IMPORT_DIR.glob("*.bin"), key=lambda x: (x.stem.split("_")[0], int(x.stem.split("_")[1]))):
+            raw = f.read_bytes()
+            day = f.stem.split("_")[0]
+            db.add_body_photo(conn, day, aes.decrypt(raw[:12], raw[12:], day.encode()))
+            days.add(day)
+        added = conn.execute("SELECT COUNT(*) FROM body_photos").fetchone()[0] - before
+    return {"added": added, "days": sorted(days)}
 
 
 @mcp.tool()
@@ -478,6 +503,36 @@ def api_delete_recipe(request, conn, body):
 def api_measurements(request, conn, body):
     return {"measurements": db.log_measurements(conn, chest=_num(body.get("chest")), waist=_num(body.get("waist")),
                                                 hips=_num(body.get("hips")), day=body.get("date"))}
+
+
+@api("/api/body", ["GET"])
+def api_body(request, conn, body):
+    return db.body_history(conn)
+
+
+@api("/api/photos", ["POST"])
+def api_add_photo(request, conn, body):
+    """{date, data}: data is a base64 JPEG (the app shrinks it to ~1600 px before sending)."""
+    raw = str(body.get("data", ""))
+    if "," in raw[:100]:
+        raw = raw.split(",", 1)[1]  # a data: URL
+    return {"photo": db.add_body_photo(conn, str(body.get("date") or db.today()), base64.b64decode(raw))}
+
+
+@api("/api/photos/{pid:int}", ["DELETE"])
+def api_delete_photo(request, conn, body):
+    return {"deleted": db.delete_body_photo(conn, request.path_params["pid"])}
+
+
+@mcp.custom_route("/api/photos/{pid:int}", methods=["GET"])
+async def api_photo_file(request: Request) -> Response:
+    if not _authed(request):
+        return _deny()
+    with db.tx() as conn:
+        path = db.body_photo_path(conn, request.path_params["pid"])
+    if not path or not os.path.exists(path):
+        return Response("not found", status_code=404)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
 @api("/api/push/key", ["GET"])

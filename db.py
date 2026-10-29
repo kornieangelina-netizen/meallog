@@ -6,9 +6,11 @@ counter. Recommendations are the daily plan. Goals and weight_log are tiny.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -129,6 +131,17 @@ CREATE TABLE IF NOT EXISTS measurements (
     waist REAL,
     hips REAL
 );
+
+-- body progress photos; the JPEG files live in data/photos (never in git), pos orders a day's shots
+CREATE TABLE IF NOT EXISTS body_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    pos INTEGER NOT NULL DEFAULT 0,
+    file TEXT NOT NULL,
+    sha TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_body_photos_date ON body_photos(date);
 
 CREATE TABLE IF NOT EXISTS recipes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -643,6 +656,53 @@ def measure_due(conn) -> str | None:
     if not last:
         return None
     return (date.fromisoformat(last) + timedelta(days=MEASURE_EVERY)).isoformat()
+
+
+PHOTO_DIR = os.path.join(os.path.dirname(DB_PATH), "photos")
+MAX_PHOTO = 8 * 1024 * 1024
+
+
+def add_body_photo(conn, day: str, data: bytes) -> dict:
+    """Store one JPEG for a body-progress date. The same picture twice (by hash) is stored once."""
+    date.fromisoformat(day)
+    if not data.startswith(b"\xff\xd8") or len(data) > MAX_PHOTO:
+        raise ValueError("нужна фотография JPEG до 8 МБ")
+    sha = hashlib.sha256(data).hexdigest()
+    dup = _row(conn.execute("SELECT * FROM body_photos WHERE sha=?", (sha,)).fetchone())
+    if dup:
+        return dup
+    os.makedirs(PHOTO_DIR, exist_ok=True)
+    name = f"{day}-{uuid.uuid4().hex[:12]}.jpg"
+    with open(os.path.join(PHOTO_DIR, name), "wb") as f:
+        f.write(data)
+    pos = conn.execute("SELECT COALESCE(MAX(pos) + 1, 0) FROM body_photos WHERE date=?", (day,)).fetchone()[0]
+    cur = conn.execute("INSERT INTO body_photos (date, pos, file, sha, created_at) VALUES (?,?,?,?,?)",
+                       (day, pos, name, sha, now_local().isoformat(timespec="seconds")))
+    return _row(conn.execute("SELECT * FROM body_photos WHERE id=?", (cur.lastrowid,)).fetchone())
+
+
+def body_photo_path(conn, photo_id: int) -> str | None:
+    r = conn.execute("SELECT file FROM body_photos WHERE id=?", (photo_id,)).fetchone()
+    return os.path.join(PHOTO_DIR, r[0]) if r else None
+
+
+def delete_body_photo(conn, photo_id: int) -> bool:
+    path = body_photo_path(conn, photo_id)
+    if not path:
+        return False
+    conn.execute("DELETE FROM body_photos WHERE id=?", (photo_id,))
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def body_history(conn) -> dict:
+    """Everything for the body page: all weights, all measurements and the photo list (no file names)."""
+    return {"weight": _rows(conn.execute("SELECT * FROM weight_log ORDER BY date")),
+            "measurements": _rows(conn.execute("SELECT * FROM measurements ORDER BY date")),
+            "photos": _rows(conn.execute("SELECT id, date, pos FROM body_photos ORDER BY date, pos, id"))}
 
 
 def kv_get(conn, key: str) -> str | None:

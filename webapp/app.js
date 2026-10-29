@@ -71,7 +71,8 @@
   const localToday = () => iso(new Date());
   const weekdayIdx = (s) => (parse(s).getDay() + 6) % 7; // 0 = Monday
   const weekStart = (s) => addDays(s, -weekdayIdx(s));
-  const maxDate = () => state.today;
+  const FUTURE_DAYS = 60; // the journal can be filled ahead, for planning
+  const maxDate = () => addDays(state.today, FUTURE_DAYS);
 
   function dateTitle(s) {
     if (s === state.today) return 'Сегодня';
@@ -395,9 +396,10 @@
   function renderLeft(d) {
     const box = $('#left-card');
     const left = Object.fromEntries(MACROS.map((m) => [m, Math.max(0, d.left[m])]));
-    if (state.date !== state.today || !d.goals.kcal) { box.innerHTML = ''; return; }
+    if (state.date < state.today || !d.goals.kcal) { box.innerHTML = ''; return; }
+    const onDay = state.date === state.today ? 'на сегодня' : `на ${dateTitle(state.date).toLowerCase()}`;
     if (left.kcal < 60) {
-      box.innerHTML = `<div class="card left-card done"><b>Норма на сегодня закрыта</b><span>${d.totals.kcal > d.goals.kcal ? `сверх нормы ${fmt(d.totals.kcal - d.goals.kcal)} ккал` : 'осталось меньше 60 ккал'}</span></div>`;
+      box.innerHTML = `<div class="card left-card done"><b>Норма ${onDay} закрыта</b><span>${d.totals.kcal > d.goals.kcal ? `сверх нормы ${fmt(d.totals.kcal - d.goals.kcal)} ккал` : 'осталось меньше 60 ккал'}</span></div>`;
       return;
     }
     const open = (m) => (d.goals[m] ? left[m] / d.goals[m] : 0);
@@ -409,7 +411,7 @@
     const word = { protein: 'белка', carbs: 'углеводов', fat: 'жиров' };
     box.innerHTML = `<div class="card left-card ${state.leftOpen ? 'open' : ''}">
         <button type="button" class="lc-toggle" aria-expanded="${state.leftOpen}">
-          <span class="lc-head"><b>Осталось на сегодня</b><span><b>${fmt(left.kcal)}</b> ккал</span></span>
+          <span class="lc-head"><b>Осталось ${onDay}</b><span><b>${fmt(left.kcal)}</b> ккал</span></span>
           <span class="lc-macros">${['protein', 'fat', 'carbs'].map((k) => `<span class="${k === m ? 'on' : ''}"><i class="dot ${k}"></i>${MACRO_SHORT[k]} ${fmt(left[k])} г</span>`).join('')}
             <em>${state.leftOpen ? 'свернуть' : 'что съесть'}<i class="lc-chev">›</i></em></span>
         </button>
@@ -1661,6 +1663,125 @@
     f.chest.value = f.waist.value = f.hips.value = '';
     toast('Объёмы записаны'); loadGoals();
   });
+
+  // ---------- body: every date with weight, measurements and photos; compare two dates ----------
+  const BODY_KEYS = [['kg', 'Вес', 'кг'], ['chest', 'ОГ', 'см'], ['waist', 'ОТ', 'см'], ['hips', 'ОБ', 'см']];
+  let bodyCmp = null; // [dateA, dateB]
+
+  function bodyDays(b) {
+    const byDate = {};
+    const day = (d) => (byDate[d] = byDate[d] || { date: d, photos: [] });
+    b.measurements.forEach((m) => Object.assign(day(m.date), { chest: m.chest, waist: m.waist, hips: m.hips }));
+    b.photos.forEach((p) => day(p.date).photos.push(p));
+    const weights = Object.fromEntries(b.weight.map((w) => [w.date, w.kg]));
+    // a measurement day shows that day's weight, or the closest one within 3 days
+    for (const d of Object.values(byDate)) {
+      for (let k = 0; k <= 3 && d.kg == null; k++) {
+        const w = weights[d.date] ?? weights[addDays(d.date, -k)] ?? weights[addDays(d.date, k)];
+        if (w != null) { d.kg = w; d.kgNear = k > 0 && weights[d.date] == null; }
+      }
+    }
+    return Object.values(byDate).sort((a, b) => (a.date < b.date ? -1 : 1));
+  }
+  const longDate = (s) => `${shortDate(s)} ${s.slice(0, 4) !== state.today.slice(0, 4) ? s.slice(0, 4) : ''}`.trim();
+  const photoUrl = (p) => `/api/photos/${p.id}`;
+  const num2 = (v) => String(Math.round(v * 100) / 100);
+
+  async function openBody() {
+    const b = await api('/api/body');
+    const days = bodyDays(b);
+    const withData = days.filter((d) => d.kg != null || d.chest != null || d.photos.length);
+    if (!bodyCmp || !withData.some((d) => d.date === bodyCmp[0]) || !withData.some((d) => d.date === bodyCmp[1])) {
+      bodyCmp = withData.length ? [withData[0].date, withData[withData.length - 1].date] : null;
+    }
+    const opt = (sel) => withData.map((d) => `<option value="${d.date}" ${d.date === sel ? 'selected' : ''}>${longDate(d.date)}</option>`).join('');
+    openPage('Фото и замеры', `
+      ${withData.length > 1 ? `<h3>Сравнить</h3>
+      <div class="card cmp">
+        <div class="cmp-pick"><select id="cmp-a">${opt(bodyCmp[0])}</select><span>→</span><select id="cmp-b">${opt(bodyCmp[1])}</select></div>
+        <div id="cmp-out"></div>
+      </div>` : ''}
+      <div class="body-add">
+        <h3>Добавить фото</h3>
+        <div class="row2"><label>Дата <input type="date" id="ph-date" value="${state.today}" max="${state.today}"></label>
+        <label class="btn ghost ph-btn">Выбрать фото<input type="file" id="ph-file" accept="image/*" multiple hidden></label></div>
+      </div>
+      <h3>Все даты <small>${withData.length}</small></h3>
+      <div id="body-list">${[...withData].reverse().map((d) => `
+        <div class="card bday" data-date="${d.date}">
+          <div class="bday-top"><b>${longDate(d.date)}</b>
+            <span>${BODY_KEYS.map(([k, l, u]) => (d[k] != null ? `<i>${l} <b>${num2(d[k])}</b>${k === 'kg' && d.kgNear ? '≈' : ''}</i>` : '')).join('')}</span></div>
+          ${d.photos.length ? `<div class="thumbs">${d.photos.map((p) => `<img loading="lazy" src="${photoUrl(p)}" data-id="${p.id}" alt="">`).join('')}</div>` : ''}
+        </div>`).join('') || '<p class="empty">Пока ничего нет. Запиши замеры или добавь фото.</p>'}</div>`, (el) => {
+      const renderCmp = () => {
+        const out = $('#cmp-out', el);
+        if (!out) return;
+        const A = days.find((d) => d.date === bodyCmp[0]), B = days.find((d) => d.date === bodyCmp[1]);
+        const rows = BODY_KEYS.map(([k, l, u]) => {
+          const a = A[k], c = B[k], diff = a != null && c != null ? c - a : null;
+          const ds = diff == null ? '–' : `${diff > 0 ? '+' : ''}${num2(diff)}`;
+          return `<tr><td class="l">${l}, ${u}</td><td>${a != null ? num2(a) : '–'}</td><td>${c != null ? num2(c) : '–'}</td><td class="${diff < 0 ? 'down' : diff > 0 ? 'up' : ''}">${ds}</td></tr>`;
+        }).join('');
+        const n = Math.max(A.photos.length, B.photos.length);
+        let pairs = '';
+        for (let i = 0; i < n; i++) {
+          const cell = (p) => (p ? `<img src="${photoUrl(p)}" data-id="${p.id}" alt="">` : '<div class="nophoto">нет фото</div>');
+          pairs += `<div class="pair">${cell(A.photos[i])}${cell(B.photos[i])}</div>`;
+        }
+        const span = daysBetween(A.date, B.date);
+        out.innerHTML = `<table class="dtable cmp-t"><tr><td></td><td>${shortDate(A.date)}</td><td>${shortDate(B.date)}</td><td>разница</td></tr>${rows}</table>
+          <p class="muted">Между датами ${Math.abs(span)} ${plural(Math.abs(span), 'день', 'дня', 'дней')}.</p>
+          ${n ? `<div class="pairs">${pairs}</div>` : ''}`;
+        $$('img', out).forEach((im) => im.addEventListener('click', () => viewPhoto(im.dataset.id)));
+      };
+      ['a', 'b'].forEach((w, i) => { const s = $(`#cmp-${w}`, el); s && s.addEventListener('change', () => { bodyCmp[i] = s.value; renderCmp(); }); });
+      renderCmp();
+      $$('.thumbs img', el).forEach((im) => im.addEventListener('click', () => viewPhoto(im.dataset.id)));
+      $('#ph-file', el).addEventListener('change', async (e) => {
+        const files = [...e.target.files];
+        const date = $('#ph-date', el).value || state.today;
+        if (!files.length) return;
+        toast(`Загружаю ${files.length} фото…`);
+        try {
+          for (const f of files) await api('/api/photos', { method: 'POST', body: { date, data: await shrinkPhoto(f) } });
+          toast('Фото добавлены');
+          openBody();
+        } catch (err) { toast(err.message); }
+      });
+    });
+  }
+
+  // shrink to 1600 px on the long side so a phone photo uploads fast and the server stays small
+  function shrinkPhoto(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        resolve(c.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Не получилось открыть фото')); };
+      img.src = url;
+    });
+  }
+
+  function viewPhoto(id) {
+    openModal(`<img class="ph-full" src="/api/photos/${id}" alt="">
+      <button class="btn ghost danger" id="ph-del">Удалить фото</button>
+      <button class="btn ghost" id="ph-close">Закрыть</button>`, (el) => {
+      el.querySelector('#ph-close').addEventListener('click', closeModal);
+      el.querySelector('#ph-del').addEventListener('click', async () => {
+        if (!confirm('Удалить это фото?')) return;
+        await api(`/api/photos/${id}`, { method: 'DELETE' });
+        closeModal(); toast('Фото удалено'); openBody();
+      });
+    });
+  }
+  $('#body-open').addEventListener('click', () => openBody().catch((e) => toast(e.message)));
 
   // check-in sheet on entering the app, from 10:00 only: today's weight if not entered yet, and the
   // measurements when two weeks have passed. Each is asked at most once a day ("Позже" means tomorrow).

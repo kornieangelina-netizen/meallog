@@ -1,7 +1,7 @@
 // Bump CACHE and the ?v= in index.html on every change to app.js / styles.css / index.html:
 // the app reloads itself on next open, and the new index.html never runs with an old app.js.
-const CACHE = 'meallog-v9';
-const ASSETS = ['/', '/app.js?v=9', '/styles.css?v=9', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'meallog-v10';
+const ASSETS = ['/', '/app.js?v=10', '/styles.css?v=10', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
