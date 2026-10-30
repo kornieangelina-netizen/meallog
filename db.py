@@ -7,6 +7,7 @@ counter. Recommendations are the daily plan. Goals and weight_log are tiny.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import re
 import sqlite3
@@ -744,6 +745,23 @@ def kv_get(conn, key: str) -> str | None:
 def kv_set(conn, key: str, value: str) -> None:
     conn.execute("INSERT INTO kv (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (key, value))
+
+
+# app password: set from the app or by Claude; stored only as a salted scrypt hash. Until one is set, the
+# APP_PASSWORD from .env is used.
+def set_app_password(conn, password: str) -> None:
+    salt = os.urandom(16)
+    h = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1)
+    kv_set(conn, "app_password", f"scrypt${salt.hex()}${h.hex()}")
+
+
+def check_app_password(conn, password: str, fallback: str) -> bool:
+    stored = kv_get(conn, "app_password")
+    if not stored:
+        return bool(fallback) and hmac.compare_digest(password, fallback)
+    _, salt, h = stored.split("$")
+    got = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=2 ** 14, r=8, p=1)
+    return hmac.compare_digest(got.hex(), h)
 
 
 def list_measurements(conn, days: int | None = 365) -> list[dict]:

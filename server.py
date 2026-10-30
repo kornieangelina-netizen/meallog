@@ -358,6 +358,17 @@ def log_weight(kg: float, day: str | None = None) -> dict:
 # REST for the PWA
 # --------------------------------------------------------------------------- #
 
+@mcp.tool()
+def set_app_password(new_password: str) -> dict:
+    """Change the password for entering the phone app. Use only when the user asks for it in their own
+    words and gives the new password. Phones that are already signed in stay signed in."""
+    if len(new_password.strip()) < 6:
+        return {"ok": False, "error": "пароль короче 6 знаков"}
+    with db.tx() as conn:
+        db.set_app_password(conn, new_password.strip())
+    return {"ok": True}
+
+
 def _authed(request: Request) -> bool:
     if not APP_COOKIE:
         return True  # dev mode without a cookie secret
@@ -386,7 +397,9 @@ async def login(request: Request) -> Response:
         return HTMLResponse(LOGIN_HTML.format(error=""))
     form = await request.form()
     pw = str(form.get("password", ""))
-    if APP_PASSWORD and hmac.compare_digest(pw, APP_PASSWORD):
+    with db.tx() as conn:
+        ok = db.check_app_password(conn, pw, APP_PASSWORD)
+    if ok:
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie(COOKIE_NAME, APP_COOKIE, max_age=COOKIE_MAX_AGE, httponly=True,
                         secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https",
@@ -635,6 +648,17 @@ def api_goals(request, conn, body):
     return {"goals": db.get_goals(conn), "weight_today": db.weight_today(conn), "weight": db.list_weight(conn, 90),
             "measurements": db.list_measurements(conn, None), "measure_due": db.measure_due(conn),
             "today": db.today(), "now_hour": db.now_local().hour}
+
+
+@api("/api/password", ["POST"])
+def api_password(request, conn, body):
+    old, new = str(body.get("old") or ""), str(body.get("new") or "").strip()
+    if not db.check_app_password(conn, old, APP_PASSWORD):
+        raise ValueError("Текущий пароль не подходит")
+    if len(new) < 6:
+        raise ValueError("Новый пароль короче 6 знаков")
+    db.set_app_password(conn, new)
+    return {"ok": True}
 
 
 @api("/api/goals", ["PUT"])

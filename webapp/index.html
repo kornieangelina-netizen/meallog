@@ -11,7 +11,7 @@
 <title>MealLog</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="stylesheet" href="/styles.css?v=11">
+<link rel="stylesheet" href="/styles.css?v=12">
 </head>
 <body>
 <div class="glow glow-a"></div>
@@ -94,6 +94,14 @@
       </div>
     </form>
     <div class="card push-card" id="push-card"></div>
+    <form id="pw-form" class="form card">
+      <div class="gf-head"><h3>Пароль для входа</h3><button type="button" class="link-btn" id="pw-edit">Сменить</button></div>
+      <div id="pw-fields" hidden>
+        <label>Текущий пароль <input type="password" name="old" autocomplete="current-password"></label>
+        <label>Новый пароль <input type="password" name="new" autocomplete="new-password" minlength="6"></label>
+        <button type="submit" class="btn">Сохранить пароль</button>
+      </div>
+    </form>
   </section>
 </main>
 
@@ -120,6 +128,6 @@
   <div class="page-body" id="page-body"></div>
 </div>
 
-<script src="/app.js?v=11"></script>
+<script src="/app.js?v=12"></script>
 </body>
 </html>

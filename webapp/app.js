@@ -1742,6 +1742,21 @@
     $('#goals-edit').click();
     loadGoals();
   });
+  $('#pw-edit').addEventListener('click', () => {
+    const f = $('#pw-fields');
+    f.hidden = !f.hidden;
+    $('#pw-edit').textContent = f.hidden ? 'Сменить' : 'Отмена';
+  });
+  $('#pw-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await api('/api/password', { method: 'POST', body: { old: f.old.value, new: f.new.value } });
+      f.old.value = f.new.value = '';
+      $('#pw-edit').click();
+      toast('Пароль изменён');
+    } catch (err) { toast(err.message); }
+  });
   $('#weight-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const kg = Number(e.target.kg.value);

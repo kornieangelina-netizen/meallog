@@ -139,3 +139,17 @@ class AnalyticsTests(unittest.TestCase):
             self.assertEqual(top["Молоко безлактозное 0,05% Parmalat Comfort"], 2)
             db.set_goals(c, protein=150)
             self.assertEqual(db.goals_history(c)[-1]["protein"], 150)
+
+
+class PasswordTests(unittest.TestCase):
+    setUp = DbTests.setUp
+    tearDown = DbTests.tearDown
+
+    def test_password_hash_overrides_env(self):
+        db = self.db
+        with db.tx() as c:
+            self.assertTrue(db.check_app_password(c, "old-env", "old-env"))
+            db.set_app_password(c, "new-pass1")
+            self.assertTrue(db.check_app_password(c, "new-pass1", "old-env"))
+            self.assertFalse(db.check_app_password(c, "old-env", "old-env"))
+            self.assertNotIn("new-pass1", db.kv_get(c, "app_password"))
