@@ -11,7 +11,7 @@
 <title>MealLog</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="stylesheet" href="/styles.css?v=10">
+<link rel="stylesheet" href="/styles.css?v=11">
 </head>
 <body>
 <div class="glow glow-a"></div>
@@ -36,7 +36,6 @@
   <!-- Журнал -->
   <section id="tab-journal" class="tab active">
     <div class="card hero" id="hero"></div>
-    <p class="pace" id="pace"></p>
     <div id="left-card"></div>
     <p class="empty" id="meals-empty" hidden>Записей пока нет. Отправь фото еды Claude или нажми «+» у любого приёма.</p>
     <div id="meals"></div>
@@ -45,7 +44,7 @@
   <!-- Продукты -->
   <section id="tab-products" class="tab">
     <div class="seg prod-seg" id="prod-seg"><button data-v="fridge" class="on">В холодильнике <small></small></button><button data-v="eaten">Съедено <small></small></button></div>
-    <div class="search-row"><input type="search" id="product-search" placeholder="Поиск по справочнику" autocomplete="off"><button class="add-btn" id="add-product" type="button" aria-label="Добавить продукт или рецепт">+</button></div>
+    <div class="search-row"><input type="search" id="product-search" placeholder="Поиск по справочнику" autocomplete="off"><button class="sort-btn" id="sort-btn" type="button" aria-label="Сортировка"><svg viewBox="0 0 24 24"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg></button><button class="add-btn" id="add-product" type="button" aria-label="Добавить продукт или рецепт">+</button></div>
     <button class="recipes-btn card" id="open-recipes" type="button"></button>
     <div id="shelf-chips"></div>
     <div id="products"></div>
@@ -66,32 +65,34 @@
 
   <!-- Цели -->
   <section id="tab-goals" class="tab">
-    <form id="goals-form" class="form card">
-      <h3>Нормы на день</h3>
-      <label><i class="dot kcal"></i>Калории <input type="number" name="kcal" inputmode="decimal"></label>
-      <label><i class="dot protein"></i>Белки, г <input type="number" name="protein" inputmode="decimal"></label>
-      <label><i class="dot fat"></i>Жиры, г <input type="number" name="fat" inputmode="decimal"></label>
-      <label><i class="dot carbs"></i>Углеводы, г <input type="number" name="carbs" inputmode="decimal"></label>
-      <button type="submit" class="btn">Сохранить</button>
-    </form>
+    <div class="card now-card" id="now-card"></div>
+    <button type="button" class="card body-open" id="body-open"><span><b>Фото и история замеров</b><small>все даты, фото, сравнение «было — стало»</small></span><i>›</i></button>
     <form id="weight-form" class="form card">
-      <h3>Вес</h3>
-      <label>Сегодня, кг <input type="number" name="kg" step="0.1" inputmode="decimal"></label>
-      <button type="submit" class="btn">Записать</button>
-      <p class="muted" id="weight-last"></p>
+      <h3>Вес сегодня</h3>
+      <div class="inline-row"><input type="number" name="kg" step="0.1" inputmode="decimal" placeholder="кг" aria-label="Вес сегодня, кг"><button type="submit" class="btn">Записать</button></div>
     </form>
     <form id="measure-form" class="form card">
       <h3>Объёмы <small>раз в 2 недели</small></h3>
-      <div class="row2">
+      <div class="row3">
+        <label>ОБ, см <input type="number" name="hips" step="0.1" inputmode="decimal" placeholder="бёдра"></label>
         <label>ОГ, см <input type="number" name="chest" step="0.1" inputmode="decimal" placeholder="грудь"></label>
         <label>ОТ, см <input type="number" name="waist" step="0.1" inputmode="decimal" placeholder="талия"></label>
-        <label>ОБ, см <input type="number" name="hips" step="0.1" inputmode="decimal" placeholder="бёдра"></label>
       </div>
       <label>Дата замера <input type="date" name="date"></label>
       <button type="submit" class="btn">Записать</button>
       <div id="measure-info"></div>
     </form>
-    <button type="button" class="card body-open" id="body-open"><span><b>Фото и история замеров</b><small>все даты, фото, сравнение «было — стало»</small></span><i>›</i></button>
+    <form id="goals-form" class="form card goals-form">
+      <div class="gf-head"><h3>Нормы на день</h3><button type="button" class="link-btn" id="goals-edit">Изменить</button></div>
+      <div class="gf-sum" id="goals-sum"></div>
+      <div class="gf-fields" id="goals-fields" hidden>
+        <label><i class="dot kcal"></i>Калории <input type="number" name="kcal" inputmode="decimal"></label>
+        <label><i class="dot protein"></i>Белки, г <input type="number" name="protein" inputmode="decimal"></label>
+        <label><i class="dot fat"></i>Жиры, г <input type="number" name="fat" inputmode="decimal"></label>
+        <label><i class="dot carbs"></i>Углеводы, г <input type="number" name="carbs" inputmode="decimal"></label>
+        <button type="submit" class="btn">Сохранить</button>
+      </div>
+    </form>
     <div class="card push-card" id="push-card"></div>
   </section>
 </main>
@@ -119,6 +120,6 @@
   <div class="page-body" id="page-body"></div>
 </div>
 
-<script src="/app.js?v=10"></script>
+<script src="/app.js?v=11"></script>
 </body>
 </html>

@@ -15,6 +15,13 @@
   const MONTHS_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
   const WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
   const WEEKDAYS_LONG = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'];
+  // Fred's own norms (stronger than the goal fields): protein anywhere in 110–150 g is fine;
+  // fat is bad only above 50 g (the goal says 45, 45–50 is still fine)
+  const PROTEIN_OK = [110, 150];
+  const FAT_MAX = 50;
+  const proteinOk = (v) => v >= PROTEIN_OK[0] && v <= PROTEIN_OK[1];
+  // body measurements in the order they sit on the chart, top to bottom
+  const MEAS = [['hips', 'ОБ', '#ee5fae'], ['chest', 'ОГ', '#3dbbf5'], ['waist', 'ОТ', '#c9d2ff']];
   const css = getComputedStyle(document.documentElement);
   const COLOR = Object.fromEntries(MACROS.map((m) => [m, css.getPropertyValue(`--${m}`).trim()]));
 
@@ -23,6 +30,8 @@
     prodView: 'fridge',
     shelf: 'all',        // fridge filter: all | home | delivery | ready | cook
     sort: 'default',     // product order: default | protein | carbs | fat | kcal
+    sortOpen: false,     // sort chips shown under the search row
+    closedShelves: [],   // fridge shelves folded by their header
     leftFocus: null,     // remainder card: null = auto (the least covered of protein / carbs)
     leftAll: false,      // remainder card: whole catalogue, not only the fridge
     leftOpen: false,     // remainder card starts collapsed: only the totals line
@@ -273,7 +282,9 @@
       const s = `${y}-${pad2(m)}-${pad2(d)}`;
       const future = s > maxDate();
       const cls = ['d', s === state.date ? 'on' : '', s === state.today ? 'today' : '', future ? 'future' : ''].join(' ');
-      cells += `<button class="${cls}" data-date="${s}" ${future ? 'disabled' : ''}>${future ? '' : dayRing(s, 40, 2.5)}<span>${d}</span></button>`;
+      const t = state.dayTotals[s];
+      const pdot = t && s < state.today && proteinOk(t.protein) ? '<i class="pdot"></i>' : '';
+      cells += `<button class="${cls}" data-date="${s}" ${future ? 'disabled' : ''}>${future ? '' : dayRing(s, 40, 2.5)}<span>${d}</span>${pdot}</button>`;
     }
     const monthTotals = Object.values(state.dayTotals).filter((t) => t.date.startsWith(state.pickerMonth));
     const avg = monthTotals.length ? Math.round(monthTotals.reduce((a, t) => a + t.kcal, 0) / monthTotals.length) : null;
@@ -281,7 +292,8 @@
       <div class="cal-head"><button id="cal-prev">‹</button><b>${MONTHS_NOM[m - 1]} ${y}</b><button id="cal-next">›</button></div>
       <div class="cal-grid">${cells}</div>
       <div class="cal-legend"><span><i style="background:${COLOR.kcal}"></i>кольцо = калории от нормы</span>
-        <span><i style="background:${COLOR.carbs}"></i>выше нормы</span></div>
+        <span><i style="background:${COLOR.carbs}"></i>выше нормы</span>
+        <span><i style="background:${COLOR.protein}"></i>белок ${PROTEIN_OK[0]}–${PROTEIN_OK[1]} г</span></div>
       <p class="muted" style="margin:10px 0 0">${monthTotals.length ? `${monthTotals.length} ${plural(monthTotals.length, 'день', 'дня', 'дней')} с записями, в среднем ${avg} ккал` : 'В этом месяце записей нет'}</p>`;
     $('#cal-prev').addEventListener('click', () => { state.pickerMonth = shiftMonth(state.pickerMonth, -1); renderMonth(); });
     $('#cal-next').addEventListener('click', () => { state.pickerMonth = shiftMonth(state.pickerMonth, 1); renderMonth(); });
@@ -315,10 +327,11 @@
   function mealTitle(m) {
     const generic = Object.values(SLOT_ONE).concat(['Перекус 1', 'Перекус 2', 'Перекус/Другое']).includes(m.name);
     if (generic && (m.description || '').startsWith('Из FatSecret: ')) {
-      return { title: m.description.slice('Из FatSecret: '.length), sub: timeOf(m.logged_at) };
+      return { title: m.description.slice('Из FatSecret: '.length), sub: '' };
     }
+    // no clock time here: it is when the entry was typed in, not when it was eaten
     const imported = (m.description || '').endsWith('Из FatSecret'); // description already carries the amount
-    return { title: m.name, sub: [timeOf(m.logged_at), m.grams && !imported ? `${fmt(m.grams)} г` : '', m.description].filter(Boolean).join(' · ') };
+    return { title: m.name, sub: [m.grams && !imported ? `${fmt(m.grams)} г` : '', m.description].filter(Boolean).join(' · ') };
   }
 
   async function loadProductsCache(force = false) {
@@ -365,7 +378,7 @@
     li.className = 'item';
     li.innerHTML = `
       <div class="row">
-        <div class="grow"><div class="name">${esc(title)}</div><div class="sub">${esc(sub)}</div></div>
+        <div class="grow"><div class="name">${esc(title)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>
         <div class="macros"><b>${fmt(m.kcal)}</b> <span class="k">ккал</span>
           <div class="mrow"><span><i class="dot protein"></i>${fmt(m.protein)}</span><span><i class="dot fat"></i>${fmt(m.fat)}</span><span><i class="dot carbs"></i>${fmt(m.carbs)}</span></div>
         </div>
@@ -434,10 +447,16 @@
     const goal = d.goals.kcal || 1;
     const pct = d.totals.kcal / goal;
     const over = d.totals.kcal > goal;
+    // one quiet status word under protein and fat, by Fred's own norms
+    const status = {
+      protein: proteinOk(d.totals.protein) ? '<em class="ok">в норме</em>' : d.totals.protein > PROTEIN_OK[1] ? `<em class="warn">больше ${PROTEIN_OK[1]} г</em>` : '',
+      fat: d.totals.fat > FAT_MAX ? `<em class="warn">больше ${FAT_MAX} г</em>` : '',
+      carbs: '',
+    };
     const minis = ['protein', 'fat', 'carbs'].map((m) => {
       const g = d.goals[m] || 1, p = d.totals[m] / g;
       return `<div class="mini"><div class="r">${ring(44, 5, p, COLOR[m])}<span>${Math.round(p * 100)}%</span></div>
-        <div class="t"><b>${fmt(d.totals[m])} <small>/ ${fmt(g)} г</small></b>${MACRO_LABELS[m]}</div></div>`;
+        <div class="t"><b>${fmt(d.totals[m])} <small>/ ${fmt(g)} г</small></b>${MACRO_LABELS[m]}${status[m]}</div></div>`;
     }).join('');
     $('#hero').innerHTML = `
       <div class="ring-big">${ring(150, 12, pct, over ? COLOR.carbs : COLOR.kcal)}
@@ -446,14 +465,6 @@
           <div class="cap">${over ? 'перебор' : `осталось ${fmt(d.left.kcal)}`}</div></div>
       </div>
       <div class="minis">${minis}</div>`;
-    const p = $('#pace');
-    if (d.pace != null && d.pace > 0 && d.count) {
-      const shouldKcal = d.goals.kcal * d.pace;
-      const diff = d.totals.kcal - shouldKcal;
-      p.innerHTML = `Темп: к этому часу обычно <b>${fmt(shouldKcal)} ккал</b>, ${diff >= 0 ? 'опережение' : 'запас'} ${fmt(Math.abs(diff))} ккал. Белка осталось <b>${fmt(Math.max(0, d.left.protein))} г</b>.`;
-    } else if (d.count) {
-      p.innerHTML = `Итого: <b>${fmt(d.totals.kcal)} ккал</b> из ${fmt(d.goals.kcal)} · Б ${fmt(d.totals.protein)} · Ж ${fmt(d.totals.fat)} · У ${fmt(d.totals.carbs)}`;
-    } else p.textContent = '';
   }
 
   // add sheet: tick several foods from the fridge / catalogue or from recent entries, set each amount and
@@ -700,8 +711,11 @@
     const fridgeView = !q && state.prodView === 'fridge';
     // sort chips everywhere; shelf chips only for the fridge
     const shelves = Object.keys(SHELF_TITLES).map((k) => [k, fridge.filter((p) => shelfOf(p) === k).length]);
+    // the sort row stays hidden behind the arrows button until it is opened or a sort is active
+    const sortShown = state.sortOpen || state.sort !== 'default';
+    $('#sort-btn').classList.toggle('on', sortShown);
     chips.innerHTML = `${fridgeView ? `<div class="shelf-chips">${[['all', fridge.length], ...shelves].map(([k, n]) => `<button type="button" data-sh="${k}" class="${k === state.shelf ? 'on' : ''}">${k === 'all' ? 'Всё' : SHELF_TITLES[k]} <small>${n}</small></button>`).join('')}</div>` : ''}
-      ${sortChips('prod-sort', state.sort)}`;
+      ${sortShown ? sortChips('prod-sort', state.sort) : ''}`;
     $$('[data-sh]', chips).forEach((b) => b.addEventListener('click', () => { state.shelf = b.dataset.sh; loadProducts(); }));
     $$('#prod-sort button', chips).forEach((b) => b.addEventListener('click', () => {
       state.sort = b.dataset.s;
@@ -713,7 +727,7 @@
 
     if (q) {
       if (!items.length) { box.innerHTML = '<p class="empty">Ничего не нашлось.</p>'; return; }
-      sorted([...fridge, ...eaten]).forEach((p) => box.appendChild(productItem(p)));
+      box.appendChild(plist(sorted([...fridge, ...eaten])));
       return;
     }
     if (fridgeView) {
@@ -728,27 +742,39 @@
           if (state.shelf !== 'all') box.insertAdjacentHTML('beforeend', `<p class="empty">На полке «${SHELF_TITLES[k]}» пусто${k === 'cook' ? '. Пришли Claude фото заказа продуктов, и он разложит их сюда.' : '.'}</p>`);
           continue;
         }
-        box.insertAdjacentHTML('beforeend', `<div class="cat">${SHELF_TITLES[k]} <small>· ${list.length} · ${fmt(kcalOf(list))} ккал</small></div>`);
-        sorted(list).forEach((p) => box.appendChild(productItem(p)));
+        // a shelf header folds its list away; the choice is remembered on this phone
+        const closed = state.shelf === 'all' && state.closedShelves.includes(k);
+        box.insertAdjacentHTML('beforeend', `<button type="button" class="cat cat-fold ${closed ? 'closed' : ''}" data-fold="${k}">${SHELF_TITLES[k]} <small>· ${list.length} · ${fmt(kcalOf(list))} ккал</small><i class="fold-chev">›</i></button>`);
+        if (closed) continue;
+        const group = document.createElement('div');
+        group.className = 'plist';
+        sorted(list).forEach((p) => group.appendChild(productItem(p)));
+        box.appendChild(group);
       }
+      $$('[data-fold]', box).forEach((b) => b.addEventListener('click', () => {
+        const k = b.dataset.fold;
+        state.closedShelves = state.closedShelves.includes(k) ? state.closedShelves.filter((x) => x !== k) : [...state.closedShelves, k];
+        try { localStorage.setItem('closedShelves', JSON.stringify(state.closedShelves)); } catch (_) { /* private mode */ }
+        loadProducts();
+      }));
       return;
     }
     // eaten: grouped by the last day it was logged, newest first; never logged go last by category
     if (!eaten.length) { box.innerHTML = '<p class="empty">Здесь появится то, что закончилось в холодильнике.</p>'; return; }
-    if (state.sort !== 'default') { sorted(eaten).forEach((p) => box.appendChild(productItem(p))); return; }
+    if (state.sort !== 'default') { box.appendChild(plist(sorted(eaten))); return; }
     const byDay = {};
     const never = [];
     for (const p of eaten) (p.last_eaten ? (byDay[p.last_eaten] = byDay[p.last_eaten] || []) : never).push(p);
     const dayLabel = (dt) => (dt === state.today ? 'Сегодня' : dt === addDays(state.today, -1) ? 'Вчера' : shortDate(dt));
     for (const dt of Object.keys(byDay).sort().reverse()) {
       box.insertAdjacentHTML('beforeend', `<div class="cat">${dayLabel(dt)}</div>`);
-      byDay[dt].forEach((p) => box.appendChild(productItem(p)));
+      box.appendChild(plist(byDay[dt]));
     }
     const cats = {};
     for (const p of never) (cats[p.category || 'Прочее'] = cats[p.category || 'Прочее'] || []).push(p);
     for (const c of Object.keys(cats).sort()) {
       box.insertAdjacentHTML('beforeend', `<div class="cat">${esc(c)} <small>· из справочника</small></div>`);
-      cats[c].forEach((p) => box.appendChild(productItem(p)));
+      box.appendChild(plist(cats[c]));
     }
   }
   $$('#prod-seg button').forEach((b) => b.addEventListener('click', () => {
@@ -757,6 +783,18 @@
     loadProducts();
   }));
   $('#open-recipes').addEventListener('click', () => openRecipes());
+  $('#sort-btn').addEventListener('click', () => {
+    if (state.sort !== 'default') { state.sort = 'default'; state.sortOpen = false; try { localStorage.setItem('sort', 'default'); } catch (_) { /* private mode */ } }
+    else state.sortOpen = !state.sortOpen;
+    loadProducts();
+  });
+  // one card per group, products inside separated by thin lines
+  function plist(items) {
+    const group = document.createElement('div');
+    group.className = 'plist';
+    items.forEach((p) => group.appendChild(productItem(p)));
+    return group;
+  }
 
   function productItem(p) {
     const unit = p.basis === 'portion' ? 'шт' : 'г';
@@ -766,9 +804,12 @@
     el.className = `item prod ${p.urgent ? 'urgent' : ''}`;
     el.innerHTML = `
       <div class="row">
-        <div class="ptop"><div class="name">${esc(p.name)}<span class="flags">${flags(p)}</span></div>${sortBadge(p, state.sort)}</div>
-        <div class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${per}</div>
-        <div class="pbot">
+        <div class="pmain">
+          <div class="name">${esc(p.name)}<span class="flags">${flags(p)}</span></div>
+          <div class="pmac"><span class="pk"><b>${fmt(p.kcal)}</b> ккал</span><span><i class="dot protein"></i>${fmt(p.protein)}</span><span><i class="dot fat"></i>${fmt(p.fat)}</span><span><i class="dot carbs"></i>${fmt(p.carbs)}</span></div>
+          <div class="pper">на ${per}${sortBadge(p, state.sort)}</div>
+        </div>
+        <div class="pside">
           ${p.fridge_qty > 0 ? `<div class="qty"><button data-d="-${step}" aria-label="меньше">−</button><span>${qty(p.fridge_qty)} ${unit}</span><button data-d="${step}" aria-label="больше">+</button></div>`
             : `<button class="back" data-act="back">+ в холодильник</button>`}
           ${shelfOf(p) === 'cook' ? '' : '<button class="eat" data-act="eat">Съела</button>'}
@@ -871,7 +912,8 @@
     openModal(`
       <h3>${isNew ? 'Новый продукт' : 'Продукт'}</h3>
       <form class="form" id="product-form">
-        <label>Название <input name="name" value="${esc(p.name || '')}" required></label>
+        <label>Название <input name="name" value="${esc(p.name || '')}" required autocomplete="off"></label>
+        ${isNew ? '<div class="similar" id="np-similar" hidden></div>' : ''}
         <label>Полка в холодильнике
           <select name="shelf">${Object.entries(SHELF_TITLES).map(([k, t]) => `<option value="${k}" ${shelfOf(p) === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
         <label>Значения указаны
@@ -891,6 +933,19 @@
         <button class="btn" type="submit">Сохранить</button>
         ${isNew ? '' : '<button class="btn ghost danger" type="button" id="p-del">Удалить из справочника</button>'}
       </form>`, (el) => {
+      // a new product that looks like one already in the catalogue: offer the existing one instead of a twin
+      const sim = $('#np-similar', el);
+      if (sim) {
+        const words = (t) => new Set(t.toLowerCase().replace(/ё/g, 'е').replace(/(\d)\.(\d)/g, '$1,$2').split(/[^\p{L}\d%,]+/u).filter((w) => w.length >= 3 || /\d/.test(w)));
+        el.querySelector('[name=name]').addEventListener('input', (e) => {
+          const w = words(e.target.value);
+          const hits = w.size < 2 ? [] : state.products.map((x) => { const xw = words(x.name); let n = 0; w.forEach((k) => { if (xw.has(k)) n += 1; }); return { x, n }; })
+            .filter((h) => h.n >= Math.min(2, w.size)).sort((a, b) => b.n - a.n).slice(0, 3);
+          sim.hidden = !hits.length;
+          sim.innerHTML = hits.length ? `<span>Похоже, уже есть в справочнике:</span>${hits.map((h, k) => `<button type="button" data-k="${k}">${esc(h.x.name)}</button>`).join('')}` : '';
+          $$('button', sim).forEach((b) => b.addEventListener('click', () => editProduct(hits[Number(b.dataset.k)].x)));
+        });
+      }
       el.querySelector('form').addEventListener('submit', async (e) => {
         e.preventDefault();
         const f = e.target;
@@ -1170,7 +1225,7 @@
       const w = weekStart(s.date);
       let cur = out[out.length - 1];
       if (!cur || cur.date !== w) { cur = { date: w, n: 0, sum: { kcal: 0, protein: 0, fat: 0, carbs: 0 } }; out.push(cur); }
-      if (s.n) { cur.n += 1; for (const m of MACROS) cur.sum[m] += s[m]; }
+      if (s.n && !s.partial) { cur.n += 1; for (const m of MACROS) cur.sum[m] += s[m]; }
     }
     return out.map((w) => ({ date: w.date, n: w.n, ...Object.fromEntries(MACROS.map((m) => [m, w.n ? w.sum[m] / w.n : null])) }));
   }
@@ -1179,13 +1234,18 @@
 
   function renderAnalytics() {
     const a = state.analytics, g = a.goals;
-    const logged = a.series.filter((s) => s.n);
+    // today is not over yet: it is drawn faded and left out of every average, count and insight
+    const logged = a.series.filter((s) => s.n && !s.partial);
     const periodName = PERIOD_NAME[state.period];
     const useWeekly = a.series.length > 120;
     const pts = useWeekly ? weeklyAll(a.series)
-      : a.series.map((s) => ({ date: s.date, n: s.n, ...Object.fromEntries(MACROS.map((m) => [m, s.n ? s[m] : null])) }));
-    const inKcal = logged.filter((s) => Math.abs(s.kcal - g.kcal) <= g.kcal * 0.1).length;
-    const inProt = logged.filter((s) => s.protein >= g.protein * 0.9).length;
+      : a.series.map((s) => ({ date: s.date, n: s.n, partial: !!s.partial, ...Object.fromEntries(MACROS.map((m) => [m, s.n ? s[m] : null])) }));
+    // a past day is judged against the goals that were set on that day
+    const hist = a.goals_history || [];
+    const goalOn = (d) => { let r = hist[0] || g; for (const h of hist) { if (h.date <= d) r = h; else break; } return r; };
+    const inKcal = logged.filter((s) => { const k = goalOn(s.date).kcal; return Math.abs(s.kcal - k) <= k * 0.1; }).length;
+    const inProt = logged.filter((s) => proteinOk(s.protein)).length;
+    const fatOver = logged.filter((s) => s.fat > FAT_MAX).length;
     const pct = (m) => (g[m] ? Math.round((100 * a.avg[m]) / g[m]) : null);
     const over = a.avg.kcal > g.kcal * 1.1;
     const best = logged.reduce((b, s) => (!b || s.kcal > b.kcal ? s : b), null);
@@ -1218,11 +1278,16 @@
       }
       if (best && low && best !== low) out.push(`Максимум <b>${fmt(best.kcal)} ккал</b> ${shortDate(best.date)}, минимум <b>${fmt(low.kcal)}</b> ${shortDate(low.date)}.`);
       if (logged.length) out.push(`В среднем <b>${fmt(logged.reduce((s, x) => s + x.n, 0) / logged.length, 1)}</b> ${plural(Math.round(logged.reduce((s, x) => s + x.n, 0) / logged.length), 'запись', 'записи', 'записей')} в день.`);
-      const pp = pct('protein');
-      if (pp != null) out.push(pp >= 95 ? `Белок в среднем <b>${pp}% нормы</b> — отлично.` : `Белка в среднем <b>${pp}% нормы</b>: не хватает около ${fmt(g.protein - a.avg.protein)} г в день.`);
+      if (logged.length) {
+        const ap = a.avg.protein;
+        out.push(ap >= PROTEIN_OK[0] ? `Белок в среднем <b>${fmt(ap)} г</b>, это в вашей норме ${PROTEIN_OK[0]}–${PROTEIN_OK[1]} г.`
+          : `Белок в среднем <b>${fmt(ap)} г</b>: до ${PROTEIN_OK[0]} г не хватает около ${fmt(PROTEIN_OK[0] - ap)} г в день.`);
+        out.push(fatOver ? `Жиры больше ${FAT_MAX} г: <b>${fatOver} ${plural(fatOver, 'день', 'дня', 'дней')}</b> из ${logged.length}.` : `Жиры ни разу не были больше ${FAT_MAX} г.`);
+      }
       return out;
     })();
     const lastM = ms.length ? ms[ms.length - 1] : null, prevM = ms.length > 1 ? ms[ms.length - 2] : null;
+    const todayNote = a.series.some((s) => s.partial && s.n) ? '<p class="muted partial-note">Сегодняшний день ещё идёт: на графиках он бледный и в средние не входит.</p>' : '';
     const mDelta = (k) => (lastM && prevM && lastM[k] != null && prevM[k] != null ? lastM[k] - prevM[k] : null);
     const mVal = (k, label) => lastM && lastM[k] != null ? `<div class="bv"><span>${label}</span><b>${fmt(lastM[k], 1)}</b><small>см${mDelta(k) != null ? ` · ${mDelta(k) > 0 ? '+' : ''}${fmt(mDelta(k), 1)}` : ''}</small></div>` : '';
 
@@ -1239,8 +1304,9 @@
       <div class="tiles">
         <div class="card tile"><b>${inKcal}<small>/${logged.length}</small></b><span>дней в норме по калориям</span></div>
         <div class="card tile"><b>${a.streak}</b><span>${plural(a.streak, 'день', 'дня', 'дней')} подряд с записями</span></div>
-        <div class="card tile"><b>${inProt}<small>/${logged.length}</small></b><span>дней добрала белок</span></div>
+        <div class="card tile"><b>${inProt}<small>/${logged.length}</small></b><span>дней белок ${PROTEIN_OK[0]}–${PROTEIN_OK[1]} г</span></div>
       </div>
+      ${todayNote}
 
       <div class="card chart-card"><div class="ch"><b>Калории</b><span>${useWeekly ? 'по неделям, среднее в день' : `по дням, ${shortDate(a.start)} – ${shortDate(a.end)}`}</span></div>
         <div class="chart" id="ch-kcal"></div>
@@ -1273,13 +1339,14 @@
         ${insights.length ? `<ul class="insights">${insights.map((t) => `<li>${t}</li>`).join('')}</ul>` : ''}
       </div>
 
-      ${a.series.length >= 60 ? `<div class="card chart-card"><div class="ch"><b>Карта дней</b><span>калории от нормы</span></div><div class="chart heat" id="ch-heat"></div>
+      ${a.series.length >= 60 ? `<div class="card chart-card"><div class="ch"><b>Карта дней</b><span>калории от нормы, нажми на день</span></div><div class="heat" id="ch-heat"></div>
         <div class="legend"><span><i class="sw" style="background:rgba(255,255,255,.07)"></i>нет записей</span><span><i class="sw" style="background:${COLOR.kcal};opacity:.45"></i>меньше нормы</span><span><i class="sw" style="background:${COLOR.kcal}"></i>в норме</span><span><i class="sw" style="background:${COLOR.carbs}"></i>выше</span></div></div>` : ''}
 
       <div class="card chart-card"><div class="ch"><b>Тело</b><span>${w.length ? `${fmt(w[w.length - 1].kg, 1)} кг${wDelta != null ? `, ${wDelta > 0 ? '+' : ''}${fmt(wDelta, 1)} ${periodName}` : ''}` : 'вес и объёмы'}</span></div>
         ${w.length > 1 ? '<div class="chart" id="ch-weight"></div>' : `<p class="muted" style="margin:4px 2px 6px">${w.length ? 'Одна запись веса за период.' : 'Веса за этот период нет. Записывай его на вкладке «Цели».'}</p>`}
-        ${lastM ? `<div class="body-vals">${mVal('chest', 'ОГ')}${mVal('waist', 'ОТ')}${mVal('hips', 'ОБ')}</div>` : '<p class="muted" style="margin:4px 2px 6px">Объёмов (ОГ / ОТ / ОБ) за этот период нет. Они записываются раз в две недели на вкладке «Цели».</p>'}
-        ${ms.length > 1 ? '<div class="chart" id="ch-meas"></div><div class="legend"><span><i class="dot" style="background:#3dbbf5"></i>ОГ</span><span><i class="dot" style="background:#c9d2ff"></i>ОТ</span><span><i class="dot" style="background:#ee5fae"></i>ОБ</span></div>' : ''}
+        ${w.length > 1 ? `<div class="legend"><span><i class="dot" style="background:#c9d2ff"></i>вес за день</span><span><i class="trend-line"></i>среднее за 7 дней</span></div>` : ''}
+        ${lastM ? `<div class="body-vals">${MEAS.map(([k, l]) => mVal(k, l)).join('')}</div>` : '<p class="muted" style="margin:4px 2px 6px">Объёмов (ОБ / ОГ / ОТ) за этот период нет. Они записываются раз в две недели на вкладке «Цели».</p>'}
+        ${ms.length > 1 ? `<div class="chart" id="ch-meas"></div><div class="legend">${MEAS.map(([, l, c]) => `<span><i class="dot" style="background:${c}"></i>${l}</span>`).join('')}</div>` : ''}
       </div>
       <h3>Чаще всего ${periodName}</h3>
       <ul class="card top-list">${a.top.length ? a.top.map((t) => `<li><div>${esc(t.name)}</div><span>× ${t.n} · ${fmt(t.kcal)} ккал</span></li>`).join('')
@@ -1292,7 +1359,9 @@
 
     // calories
     const kc = $('#ch-kcal');
-    const kOpts = { values: pts.map((p) => p.kcal), color: COLOR.kcal, goal: g.kcal, unit: 'ккал', label: xLabel, tip: (i) => ({ title: `${fmt(pts[i].kcal)} ккал`, text: ptTitle(i) }) };
+    const faded = (i) => !!pts[i].partial;
+    const ptTitle2 = (i) => `${ptTitle(i)}${pts[i].partial ? ', день ещё идёт' : ''}`;
+    const kOpts = { values: pts.map((p) => p.kcal), color: COLOR.kcal, goal: g.kcal, unit: 'ккал', label: xLabel, faded, tip: (i) => ({ title: `${fmt(pts[i].kcal)} ккал`, text: ptTitle2(i) }) };
     if (!useWeekly && n > 45) line(kc, kOpts); else bars(kc, kOpts);
     $('#tbl').innerHTML = `<table class="dtable">${pts.filter((p) => p.kcal != null).map((p) => `<tr><td class="l">${useWeekly ? `нед. с ${shortDate(p.date)}` : `${shortDate(p.date)}, ${WEEKDAYS[weekdayIdx(p.date)]}`}</td><td>${fmt(p.kcal)} ккал</td><td><i class="dot protein"></i>${fmt(p.protein)}</td><td><i class="dot fat"></i>${fmt(p.fat)}</td><td><i class="dot carbs"></i>${fmt(p.carbs)}</td></tr>`).join('')}</table>`;
     $('#tbl-toggle').addEventListener('click', () => { state.showTable = !state.showTable; $('#tbl').hidden = !state.showTable; $('#tbl-toggle').textContent = state.showTable ? 'Скрыть таблицу' : 'Показать таблицу'; });
@@ -1303,13 +1372,13 @@
       if (state.bju === 'all') {
         stackedBars(el, {
           series: ['protein', 'fat', 'carbs'].map((m) => ({ key: m, color: COLOR[m], values: pts.map((p) => p[m]) })),
-          unit: 'г', label: xLabel, height: 190,
-          tip: (i) => ({ title: `${fmt(pts[i].protein + pts[i].fat + pts[i].carbs)} г`, text: `${ptTitle(i)}<br><i class="dot protein"></i> Б ${fmt(pts[i].protein)} · <i class="dot fat"></i> Ж ${fmt(pts[i].fat)} · <i class="dot carbs"></i> У ${fmt(pts[i].carbs)}` }),
+          unit: 'г', label: xLabel, height: 190, faded,
+          tip: (i) => ({ title: `${fmt(pts[i].protein + pts[i].fat + pts[i].carbs)} г`, text: `${ptTitle2(i)}<br><i class="dot protein"></i> Б ${fmt(pts[i].protein)} · <i class="dot fat"></i> Ж ${fmt(pts[i].fat)} · <i class="dot carbs"></i> У ${fmt(pts[i].carbs)}` }),
         });
         lg.innerHTML = ['protein', 'fat', 'carbs'].map((m) => `<span><i class="dot ${m}"></i>${MACRO_LABELS[m].toLowerCase()}, норма ${fmt(g[m])} г</span>`).join('');
       } else {
         const m = state.bju;
-        const o = { values: pts.map((p) => p[m]), color: COLOR[m], goal: g[m], unit: 'г', label: xLabel, height: 190, tip: (i) => ({ title: `${fmt(pts[i][m])} г`, text: ptTitle(i) }) };
+        const o = { values: pts.map((p) => p[m]), color: COLOR[m], goal: g[m], unit: 'г', label: xLabel, height: 190, faded, tip: (i) => ({ title: `${fmt(pts[i][m])} г`, text: ptTitle2(i) }) };
         if (!useWeekly && n > 45) line(el, o); else bars(el, o);
         lg.innerHTML = `<span><i class="dot ${m}"></i>${MACRO_LABELS[m].toLowerCase()}, г</span><span><i class="goal-line"></i>норма ${fmt(g[m])} г</span>`;
       }
@@ -1327,20 +1396,21 @@
       label: (i) => WEEKDAYS[i],
       tip: (i) => ({ title: `${fmt(wd[i])} ккал`, text: `${WEEKDAYS_LONG[i]} · ${a.weekday[i].n} ${plural(a.weekday[i].n, 'день', 'дня', 'дней')}` }),
     });
-    if ($('#ch-heat')) heatmap($('#ch-heat'), { series: a.series, goal: g.kcal });
+    if ($('#ch-heat')) heatmap($('#ch-heat'), { series: a.series, goalOn: (d) => goalOn(d).kcal });
     if (w.length > 1) {
-      line($('#ch-weight'), {
-        values: w.map((x) => x.kg), color: '#c9d2ff', unit: 'кг', height: 150, decimals: 1, zero: false,
-        label: (i) => (i === 0 || i === w.length - 1 || (w.length > 6 && i % Math.ceil(w.length / 5) === 0) ? shortDate(w[i].date) : ''),
-        tip: (i) => ({ title: `${fmt(w[i].kg, 1)} кг`, text: dateTitle(w[i].date) }),
+      // daily weight jumps by a few hundred grams: the bold line is the average of the last 7 days
+      const trend = w.map((x) => { const from = addDays(x.date, -6); const win = w.filter((y) => y.date >= from && y.date <= x.date); return win.reduce((s, y) => s + y.kg, 0) / win.length; });
+      timeChart($('#ch-weight'), {
+        dates: w.map((x) => x.date), unit: 'кг', height: 160, decimals: 1,
+        series: [{ values: w.map((x) => x.kg), color: '#c9d2ff', faint: true }, { values: trend, color: '#c9d2ff', bold: true }],
+        tip: (i) => ({ title: `${fmt(w[i].kg, 1)} кг`, text: `${dateTitle(w[i].date)} · среднее за 7 дней ${fmt(trend[i], 1)}` }),
       });
     }
     if (ms.length > 1) {
-      multiLine($('#ch-meas'), {
-        series: [{ name: 'ОГ', color: '#3dbbf5', values: ms.map((x) => x.chest) }, { name: 'ОТ', color: '#c9d2ff', values: ms.map((x) => x.waist) }, { name: 'ОБ', color: '#ee5fae', values: ms.map((x) => x.hips) }],
-        unit: 'см', height: 160, decimals: 0, zero: false,
-        label: (i) => (i === 0 || i === ms.length - 1 || (ms.length > 6 && i % Math.ceil(ms.length / 5) === 0) ? shortDate(ms[i].date) : ''),
-        tip: (i) => ({ title: shortDate(ms[i].date), text: ['chest', 'waist', 'hips'].map((k, j) => `${['ОГ', 'ОТ', 'ОБ'][j]} ${ms[i][k] != null ? fmt(ms[i][k], 1) : '–'}`).join(' · ') }),
+      timeChart($('#ch-meas'), {
+        dates: ms.map((x) => x.date), unit: 'см', height: 200, decimals: 0,
+        series: MEAS.map(([k, , c]) => ({ values: ms.map((x) => x[k]), color: c })),
+        tip: (i) => ({ title: shortDate(ms[i].date), text: MEAS.map(([k, l]) => `${l} ${ms[i][k] != null ? fmt(ms[i][k], 1) : '–'}`).join(' · ') }),
       });
     }
   }
@@ -1442,7 +1512,7 @@
       if (lbl !== '' && lbl != null) s += `<text x="${x(i)}" y="${f.H - 6}" text-anchor="middle">${lbl}</text>`;
       if (v == null) return;
       const top = f.y(v), base = f.y(f.min), h = Math.max(0, base - top), r = Math.min(4, h / 2, bw / 2);
-      s += `<path class="bar" data-i="${i}" filter="url(#${id}f)" fill="url(#${id})" d="M${x(i) - bw / 2} ${base} v${-(h - r)} a${r} ${r} 0 0 1 ${r} ${-r} h${bw - 2 * r} a${r} ${r} 0 0 1 ${r} ${r} v${h - r} z"/>`;
+      s += `<path class="bar${opts.faded && opts.faded(i) ? ' faded' : ''}" data-i="${i}" filter="url(#${id}f)" fill="url(#${id})" d="M${x(i) - bw / 2} ${base} v${-(h - r)} a${r} ${r} 0 0 1 ${r} ${-r} h${bw - 2 * r} a${r} ${r} 0 0 1 ${r} ${r} v${h - r} z"/>`;
     });
     s += `<line class="cursor" id="${id}c" x1="0" x2="0" y1="${f.pad.t}" y2="${f.H - f.pad.b}" visibility="hidden"/></svg>`;
     el.innerHTML = s;
@@ -1468,7 +1538,7 @@
       if (lbl !== '' && lbl != null) s += `<text x="${x(i)}" y="${f.H - 6}" text-anchor="middle">${lbl}</text>`;
       if (totals[i] == null) continue;
       let acc = 0;
-      s += `<g class="bar" data-i="${i}">`;
+      s += `<g class="bar${opts.faded && opts.faded(i) ? ' faded' : ''}" data-i="${i}">`;
       opts.series.forEach((ser, k) => {
         const v = ser.values[i] || 0;
         if (v <= 0) return;
@@ -1503,19 +1573,21 @@
     const n = opts.values.length;
     const x = (i) => f.pad.l + ((f.W - f.pad.l - f.pad.r) * i) / Math.max(1, n - 1);
     const id = `l${++gid}`;
-    const vals = opts.values.map((v, i) => [i, v]).filter(([, v]) => v != null);
+    const isFaded = (i) => !!(opts.faded && opts.faded(i));
+    const vals = opts.values.map((v, i) => [i, v]).filter(([i, v]) => v != null && !isFaded(i));
     let area = '', dots = '';
     if (vals.length) {
       area = `M${x(vals[0][0]).toFixed(1)} ${f.y(f.min)} ` + vals.map(([i, v]) => `L${x(i).toFixed(1)} ${f.y(v).toFixed(1)}`).join(' ') + ` L${x(vals[vals.length - 1][0]).toFixed(1)} ${f.y(f.min)} Z`;
       const [li, lv] = vals[vals.length - 1];
       dots = `<circle cx="${x(li)}" cy="${f.y(lv)}" r="4.5" fill="${opts.color}" stroke="#0f1526" stroke-width="2"/>`;
     }
+    opts.values.forEach((v, i) => { if (v != null && isFaded(i)) dots += `<circle cx="${x(i)}" cy="${f.y(v)}" r="3.5" fill="#0f1526" stroke="${opts.color}" stroke-width="1.5" opacity=".7"/>`; });
     let s = `<svg viewBox="0 0 ${f.W} ${f.H}"><defs>
       <linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${opts.color}" stop-opacity=".35"/><stop offset="1" stop-color="${opts.color}" stop-opacity="0"/></linearGradient>
       <filter id="${id}f" x="-10%" y="-40%" width="120%" height="180%"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
       </defs>${f.grid}
       <path d="${area}" fill="url(#${id})"/>
-      <path d="${linePath(x, f.y, opts.values)}" fill="none" stroke="${opts.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" filter="url(#${id}f)"/>${dots}`;
+      <path d="${linePath(x, f.y, opts.values.map((v, i) => (isFaded(i) ? null : v)))}" fill="none" stroke="${opts.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" filter="url(#${id}f)"/>${dots}`;
     opts.values.forEach((v, i) => {
       const lbl = opts.label ? opts.label(i) : '';
       if (lbl !== '' && lbl != null) s += `<text x="${x(i)}" y="${f.H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${lbl}</text>`;
@@ -1533,76 +1605,69 @@
     attachHover(el, x, n, { ...opts, W: f.W, H: f.H, has: (i) => opts.values[i] != null }, markAt);
   }
 
-  // several lines on ONE axis (same unit), e.g. body measurements in cm
-  function multiLine(el, opts) {
-    const all = opts.series.flatMap((s) => s.values);
-    const f = frame(el, { ...opts, values: all });
-    const n = opts.series[0].values.length;
-    const x = (i) => f.pad.l + ((f.W - f.pad.l - f.pad.r) * i) / Math.max(1, n - 1);
-    const id = `m${++gid}`;
-    let s = `<svg viewBox="0 0 ${f.W} ${f.H}">${f.grid}`;
+  // lines over REAL time: a point sits at its date, so three months between two weighings look like three
+  // months, not like one step. Series share one axis; `faint` = thin with dots, `bold` = glowing main line.
+  function timeChart(el, opts) {
+    const all = opts.series.flatMap((ser) => ser.values);
+    const f = frame(el, { ...opts, values: all, zero: false });
+    const t = opts.dates.map((d) => parse(d).getTime());
+    const t0 = t[0], t1 = Math.max(t[t.length - 1], t0 + 864e5);
+    const pw = f.W - f.pad.l - f.pad.r;
+    const xt = (ms) => f.pad.l + (pw * (ms - t0)) / (t1 - t0);
+    const x = (i) => xt(t[i]);
+    const id = `t${++gid}`;
+    let s = `<svg viewBox="0 0 ${f.W} ${f.H}"><defs>
+      <filter id="${id}f" x="-10%" y="-40%" width="120%" height="180%"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>${f.grid}`;
     for (const ser of opts.series) {
-      s += `<path d="${linePath(x, f.y, ser.values)}" fill="none" stroke="${ser.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-      ser.values.forEach((v, i) => { if (v != null) s += `<circle cx="${x(i)}" cy="${f.y(v)}" r="3" fill="${ser.color}" stroke="#0f1526" stroke-width="1.5"/>`; });
+      const d = linePath(x, f.y, ser.values);
+      if (ser.bold) {
+        s += `<path d="${d}" fill="none" stroke="${ser.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" filter="url(#${id}f)"/>`;
+        const li = ser.values.length - 1;
+        if (ser.values[li] != null) s += `<circle cx="${x(li)}" cy="${f.y(ser.values[li])}" r="4.5" fill="${ser.color}" stroke="#0f1526" stroke-width="2"/>`;
+      } else {
+        s += `<path d="${d}" fill="none" stroke="${ser.color}" stroke-width="${ser.faint ? 1 : 2}" stroke-opacity="${ser.faint ? 0.35 : 1}" stroke-linejoin="round" stroke-linecap="round"/>`;
+        ser.values.forEach((v, i) => { if (v != null) s += `<circle cx="${x(i)}" cy="${f.y(v)}" r="${ser.faint ? 2.2 : 3}" fill="${ser.color}" fill-opacity="${ser.faint ? 0.55 : 1}" stroke="#0f1526" stroke-width="1"/>`; });
+      }
     }
-    opts.series[0].values.forEach((_, i) => {
-      const lbl = opts.label ? opts.label(i) : '';
-      if (lbl !== '' && lbl != null) s += `<text x="${x(i)}" y="${f.H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${lbl}</text>`;
-    });
+    // date labels evenly spread over time (not over points), so they never pile up
+    const nl = Math.max(2, Math.min(5, Math.floor(pw / 78) + 1));
+    for (let k = 0; k < nl; k++) {
+      const ms = t0 + ((t1 - t0) * k) / (nl - 1);
+      s += `<text x="${xt(ms)}" y="${f.H - 6}" text-anchor="${k === 0 ? 'start' : k === nl - 1 ? 'end' : 'middle'}">${shortDate(iso(new Date(ms)))}</text>`;
+    }
     s += `<line class="cursor" id="${id}c" x1="0" x2="0" y1="${f.pad.t}" y2="${f.H - f.pad.b}" visibility="hidden"/></svg>`;
     el.innerHTML = s;
     const cur = el.querySelector(`#${id}c`);
+    const main = opts.series.find((ser) => ser.bold) || opts.series[0];
     const markAt = (i) => { if (i < 0) cur.setAttribute('visibility', 'hidden'); else { cur.setAttribute('x1', x(i)); cur.setAttribute('x2', x(i)); cur.setAttribute('visibility', 'visible'); } };
-    markAt.y = () => f.pad.t;
-    attachHover(el, x, n, { ...opts, values: all, W: f.W, H: f.H }, markAt);
+    markAt.y = (i) => (main.values[i] != null ? f.y(main.values[i]) : f.pad.t);
+    attachHover(el, x, t.length, { ...opts, values: all, W: f.W, H: f.H }, markAt);
   }
 
-  // calendar heatmap: one column per week, Monday on top; color = calories against the goal
+  // day map: one small calendar per month (Monday first), colour = calories against the goal.
+  // Tapping a day opens it in the journal.
   function heatmap(el, opts) {
-    const days = opts.series, goal = opts.goal || 1;
-    const first = weekStart(days[0].date);
-    const weeks = Math.ceil((parse(days[days.length - 1].date) - parse(first)) / 864e5 / 7) + 1;
-    const W = el.clientWidth || 320, padL = 22, padT = 16, gap = 2;
-    const cell = Math.min(14, Math.floor((W - padL - gap * (weeks - 1)) / weeks));
-    const H = padT + 7 * (cell + gap);
-    const byDate = Object.fromEntries(days.map((d) => [d.date, d]));
-    let s = `<svg viewBox="0 0 ${W} ${H}">`;
-    ['пн', '', 'ср', '', 'пт', '', 'вс'].forEach((t, r) => { if (t) s += `<text x="0" y="${padT + r * (cell + gap) + cell * 0.8}">${t}</text>`; });
-    const cells = [];
-    let lastMonth = '';
-    for (let w = 0; w < weeks; w++) {
-      const ws = addDays(first, w * 7);
-      const mon = ws.slice(0, 7);
-      const nextMon = addDays(ws, 14).slice(0, 7);
-      if (mon !== lastMonth && (w === 0 || parse(ws).getDate() <= 7) && !(w === 0 && nextMon !== mon)) { lastMonth = mon; s += `<text x="${padL + w * (cell + gap)}" y="10">${MONTHS_NOM[parse(ws).getMonth()].slice(0, 3)}</text>`; }
-      for (let r = 0; r < 7; r++) {
-        const date = addDays(ws, r);
-        const d = byDate[date];
-        if (!d) continue;
-        const ratio = d.n ? d.kcal / goal : null;
-        const fill = ratio == null ? 'rgba(255,255,255,.07)' : ratio > 1.1 ? COLOR.carbs : COLOR.kcal;
-        const op = ratio == null ? 1 : ratio > 1.1 ? Math.min(1, 0.6 + (ratio - 1.1)) : ratio < 0.9 ? Math.max(0.25, ratio * 0.5) : 1;
-        const cx = padL + w * (cell + gap), cy = padT + r * (cell + gap);
-        cells.push({ date, d, cx, cy });
-        s += `<rect class="cellr" data-i="${cells.length - 1}" x="${cx}" y="${cy}" width="${cell}" height="${cell}" rx="3" fill="${fill}" fill-opacity="${op}"/>`;
-      }
-    }
-    s += '</svg>';
-    el.innerHTML = s;
-    const svg = el.querySelector('svg');
-    let timer;
-    const pick = (e) => {
-      const b = svg.getBoundingClientRect();
-      const sx = (e.clientX - b.left) * (W / b.width), sy = (e.clientY - b.top) * (H / b.height);
-      const c = cells.find((k) => sx >= k.cx && sx <= k.cx + cell && sy >= k.cy && sy <= k.cy + cell);
-      if (!c) return;
-      $$('.cellr', svg).forEach((r) => r.classList.toggle('on', Number(r.dataset.i) === cells.indexOf(c)));
-      const t = c.d.n ? { title: `${fmt(c.d.kcal)} ккал`, text: `${dateTitle(c.date)} · ${Math.round((100 * c.d.kcal) / goal)}% нормы · Б ${fmt(c.d.protein)} · Ж ${fmt(c.d.fat)} · У ${fmt(c.d.carbs)}` } : { title: 'Нет записей', text: dateTitle(c.date) };
-      showTip(el, c.cx + cell / 2, c.cy, W, H, t);
-      clearTimeout(timer); timer = setTimeout(hideAllTips, 2500);
+    const byDate = Object.fromEntries(opts.series.map((d) => [d.date, d]));
+    const months = [];
+    for (const d of opts.series) { const m = d.date.slice(0, 7); if (months[months.length - 1] !== m) months.push(m); }
+    const cellCls = (d) => {
+      if (!d || !d.n) return 'none';
+      if (d.partial) return 'part';
+      const r = d.kcal / (opts.goalOn(d.date) || 1);
+      return r > 1.1 ? 'over' : r < 0.9 ? 'under' : 'ok';
     };
-    el.addEventListener('pointermove', pick);
-    el.addEventListener('pointerdown', pick);
+    el.innerHTML = months.map((m) => {
+      const [y, mo] = m.split('-').map(Number);
+      const first = `${m}-01`, n = new Date(y, mo, 0).getDate();
+      let cells = '<i class="pad"></i>'.repeat(weekdayIdx(first));
+      for (let k = 1; k <= n; k++) {
+        const ds = `${m}-${pad2(k)}`, d = byDate[ds];
+        cells += d ? `<button type="button" class="hc ${cellCls(d)}" data-date="${ds}" aria-label="${shortDate(ds)}"></button>` : '<i class="pad"></i>';
+      }
+      return `<div class="hm"><b>${MONTHS_NOM[mo - 1]}</b><div class="hm-grid">${cells}</div></div>`;
+    }).reverse().join('');
+    $$('.hc', el).forEach((b) => b.addEventListener('click', () => { state.date = b.dataset.date; showTab('journal'); window.scrollTo(0, 0); }));
   }
 
   let resizeTimer;
@@ -1618,12 +1683,42 @@
     const g = await api('/api/goals');
     const f = $('#goals-form');
     for (const k of MACROS) f[k].value = g.goals[k];
-    const last = g.weight[g.weight.length - 1];
-    $('#weight-last').textContent = last ? `Последняя запись: ${fmt(last.kg, 1)} кг (${shortDate(last.date)})` : 'Веса ещё нет';
+    $('#goals-sum').innerHTML = `<span><i class="dot kcal"></i><b>${fmt(g.goals.kcal)}</b> ккал</span>
+      <span><i class="dot protein"></i>Б <b>${fmt(g.goals.protein)}</b></span><span><i class="dot fat"></i>Ж <b>${fmt(g.goals.fat)}</b></span><span><i class="dot carbs"></i>У <b>${fmt(g.goals.carbs)}</b></span>
+      <p class="muted">Белок в норме при ${PROTEIN_OK[0]}–${PROTEIN_OK[1]} г, жиры плохо только больше ${FAT_MAX} г.</p>`;
     if (g.weight_today) $('#weight-form').kg.value = g.weight_today.kg;
+    renderNow(g);
     renderMeasurements(g.measurements || []);
     renderPush();
   }
+
+  // «где я сейчас»: weight with its 7-day average and the month's change, the last measurements
+  function renderNow(g) {
+    const w = g.weight || [], ms = g.measurements || [];
+    const last = w[w.length - 1];
+    const box = $('#now-card');
+    if (!last && !ms.length) { box.innerHTML = '<h3>Сейчас</h3><p class="muted">Здесь появятся вес и объёмы, когда они будут записаны.</p>'; return; }
+    const avg7 = last ? (() => { const from = addDays(last.date, -6); const win = w.filter((x) => x.date >= from); return win.reduce((s, x) => s + x.kg, 0) / win.length; })() : null;
+    const monthAgo = last ? [...w].reverse().find((x) => x.date <= addDays(last.date, -28)) : null;
+    const dm = monthAgo ? last.kg - monthAgo.kg : null;
+    const lm = ms[ms.length - 1], pm = ms[ms.length - 2];
+    const cell = (k, label) => {
+      const d = lm && pm && lm[k] != null && pm[k] != null ? lm[k] - pm[k] : null;
+      return `<div class="bv"><span>${label}</span><b>${lm && lm[k] != null ? fmt(lm[k], 1) : '–'}</b><small>см${d != null ? ` <em class="${d < 0 ? 'down' : d > 0 ? 'up' : ''}">${d > 0 ? '+' : ''}${fmt(d, 1)}</em>` : ''}</small></div>`;
+    };
+    box.innerHTML = `<h3>Сейчас</h3>
+      ${last ? `<div class="now-w"><b>${fmt(last.kg, 1)}</b><span>кг · ${dateTitle(last.date).toLowerCase()}</span></div>
+        <p class="muted now-sub">Среднее за 7 дней <b>${fmt(avg7, 1)} кг</b>${dm != null ? ` · за 4 недели ${dm > 0 ? '+' : ''}${fmt(dm, 1)} кг` : ''}</p>` : ''}
+      ${lm ? `<div class="body-vals">${MEAS.map(([k, l]) => cell(k, l)).join('')}</div>
+        <p class="muted now-sub">Замер ${shortDate(lm.date)}${pm ? `, разница с ${shortDate(pm.date)}` : ''}</p>` : ''}`;
+  }
+
+  $('#goals-edit').addEventListener('click', () => {
+    const fields = $('#goals-fields');
+    fields.hidden = !fields.hidden;
+    $('#goals-sum').hidden = !fields.hidden;
+    $('#goals-edit').textContent = fields.hidden ? 'Изменить' : 'Отмена';
+  });
 
   function renderMeasurements(ms) {
     const f = $('#measure-form');
@@ -1635,17 +1730,17 @@
     const cell = (k, label) => `<div class="bv"><span>${label}</span><b>${last[k] != null ? fmt(last[k], 1) : '–'}</b><small>см${d(k) != null ? ` <em class="${d(k) < 0 ? 'down' : d(k) > 0 ? 'up' : ''}">${d(k) > 0 ? '+' : ''}${fmt(d(k), 1)}</em>` : ''}</small></div>`;
     const next = addDays(last.date, MEASURE_EVERY);
     const left = daysBetween(state.today, next);
-    info.innerHTML = `<div class="body-vals">${cell('chest', 'ОГ')}${cell('waist', 'ОТ')}${cell('hips', 'ОБ')}</div>
-      <p class="muted">Последний замер ${shortDate(last.date)}${prev ? `, изменения — к ${shortDate(prev.date)}` : ''}.
-      Следующий: <b>${left <= 0 ? 'уже пора' : left === 1 ? 'завтра' : `${shortDate(next)}, через ${left} ${plural(left, 'день', 'дня', 'дней')}`}</b>.</p>
-      ${ms.length > 1 ? `<details class="hist"><summary>Все замеры (${ms.length})</summary><table class="dtable">${[...ms].reverse().map((m) => `<tr><td class="l">${shortDate(m.date)}</td><td>${m.chest != null ? fmt(m.chest, 1) : '–'}</td><td>${m.waist != null ? fmt(m.waist, 1) : '–'}</td><td>${m.hips != null ? fmt(m.hips, 1) : '–'}</td></tr>`).join('')}</table></details>` : ''}`;
+    void cell;
+    info.innerHTML = `<p class="muted">Последний замер ${shortDate(last.date)}. Следующий: <b>${left <= 0 ? 'уже пора' : left === 1 ? 'завтра' : `${shortDate(next)}, через ${left} ${plural(left, 'день', 'дня', 'дней')}`}</b>.</p>`;
   }
 
   $('#goals-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const r = await api('/api/goals', { method: 'PUT', body: Object.fromEntries(new FormData(e.target)) });
     state.goals = r.goals;
-    toast('Цели сохранены');
+    toast('Нормы сохранены');
+    $('#goals-edit').click();
+    loadGoals();
   });
   $('#weight-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1665,7 +1760,7 @@
   });
 
   // ---------- body: every date with weight, measurements and photos; compare two dates ----------
-  const BODY_KEYS = [['kg', 'Вес', 'кг'], ['chest', 'ОГ', 'см'], ['waist', 'ОТ', 'см'], ['hips', 'ОБ', 'см']];
+  const BODY_KEYS = [['kg', 'Вес', 'кг'], ...MEAS.map(([k, l]) => [k, l, 'см'])];
   let bodyCmp = null; // [dateA, dateB]
 
   function bodyDays(b) {
@@ -1694,6 +1789,8 @@
     if (!bodyCmp || !withData.some((d) => d.date === bodyCmp[0]) || !withData.some((d) => d.date === bodyCmp[1])) {
       bodyCmp = withData.length ? [withData[0].date, withData[withData.length - 1].date] : null;
     }
+    const allPhotos = [...withData].reverse().flatMap((d) => d.photos.map((p) => ({ ...p, date: d.date })));
+    const view = (id) => viewPhotos(allPhotos, Number(id));
     const opt = (sel) => withData.map((d) => `<option value="${d.date}" ${d.date === sel ? 'selected' : ''}>${longDate(d.date)}</option>`).join('');
     openPage('Фото и замеры', `
       ${withData.length > 1 ? `<h3>Сравнить</h3>
@@ -1701,10 +1798,10 @@
         <div class="cmp-pick"><select id="cmp-a">${opt(bodyCmp[0])}</select><span>→</span><select id="cmp-b">${opt(bodyCmp[1])}</select></div>
         <div id="cmp-out"></div>
       </div>` : ''}
-      <div class="body-add">
-        <h3>Добавить фото</h3>
-        <div class="row2"><label>Дата <input type="date" id="ph-date" value="${state.today}" max="${state.today}"></label>
-        <label class="btn ghost ph-btn">Выбрать фото<input type="file" id="ph-file" accept="image/*" multiple hidden></label></div>
+      <h3>Добавить фото</h3>
+      <div class="card body-add">
+        <label class="fld">Дата съёмки<input type="date" id="ph-date" value="${state.today}" max="${state.today}"></label>
+        <label class="btn ghost ph-btn">Выбрать фото<input type="file" id="ph-file" accept="image/*" multiple hidden></label>
       </div>
       <h3>Все даты <small>${withData.length}</small></h3>
       <div id="body-list">${[...withData].reverse().map((d) => `
@@ -1732,11 +1829,11 @@
         out.innerHTML = `<table class="dtable cmp-t"><tr><td></td><td>${shortDate(A.date)}</td><td>${shortDate(B.date)}</td><td>разница</td></tr>${rows}</table>
           <p class="muted">Между датами ${Math.abs(span)} ${plural(Math.abs(span), 'день', 'дня', 'дней')}.</p>
           ${n ? `<div class="pairs">${pairs}</div>` : ''}`;
-        $$('img', out).forEach((im) => im.addEventListener('click', () => viewPhoto(im.dataset.id)));
+        $$('img', out).forEach((im) => im.addEventListener('click', () => view(im.dataset.id)));
       };
       ['a', 'b'].forEach((w, i) => { const s = $(`#cmp-${w}`, el); s && s.addEventListener('change', () => { bodyCmp[i] = s.value; renderCmp(); }); });
       renderCmp();
-      $$('.thumbs img', el).forEach((im) => im.addEventListener('click', () => viewPhoto(im.dataset.id)));
+      $$('.thumbs img', el).forEach((im) => im.addEventListener('click', () => view(im.dataset.id)));
       $('#ph-file', el).addEventListener('change', async (e) => {
         const files = [...e.target.files];
         const date = $('#ph-date', el).value || state.today;
@@ -1769,17 +1866,57 @@
     });
   }
 
-  function viewPhoto(id) {
-    openModal(`<img class="ph-full" src="/api/photos/${id}" alt="">
-      <button class="btn ghost danger" id="ph-del">Удалить фото</button>
-      <button class="btn ghost" id="ph-close">Закрыть</button>`, (el) => {
-      el.querySelector('#ph-close').addEventListener('click', closeModal);
-      el.querySelector('#ph-del').addEventListener('click', async () => {
+  // full-screen photo viewer: swipe (or the arrows) through every photo; «Два рядом» shows the photo and the
+  // next one side by side, and swiping then moves the pair by one photo
+  let viewerPair = false;
+  function viewPhotos(list, id) {
+    if (!list.length) return;
+    let i = Math.max(0, list.findIndex((p) => p.id === id));
+    const v = document.createElement('div');
+    v.className = 'viewer';
+    document.body.appendChild(v);
+    document.body.classList.add('page-open');
+    const close = () => { v.remove(); if ($('#page').hidden) document.body.classList.remove('page-open'); };
+    const img = (p) => (p ? `<figure><img src="${photoUrl(p)}" alt=""><figcaption>${shortDate(p.date)}</figcaption></figure>` : '<figure class="none"><div class="nophoto">дальше фото нет</div></figure>');
+    const render = () => {
+      const last = viewerPair ? Math.max(0, list.length - 2) : list.length - 1;
+      i = Math.min(i, last);
+      const cur = list[i];
+      v.innerHTML = `<div class="v-top">
+          <button type="button" class="v-btn" data-v="close" aria-label="Закрыть">✕</button>
+          <span class="v-pos">${viewerPair ? `${i + 1}–${Math.min(i + 2, list.length)}` : i + 1} из ${list.length}</span>
+          <button type="button" class="v-mode ${viewerPair ? 'on' : ''}" data-v="pair">Два рядом</button></div>
+        <div class="v-stage ${viewerPair ? 'pair' : ''}">${img(cur)}${viewerPair ? img(list[i + 1]) : ''}</div>
+        <div class="v-bottom">
+          <button type="button" class="v-btn" data-v="prev" ${i === 0 ? 'disabled' : ''} aria-label="Назад">‹</button>
+          ${viewerPair ? '' : '<button type="button" class="v-del" data-v="del">Удалить фото</button>'}
+          <button type="button" class="v-btn" data-v="next" ${i >= last ? 'disabled' : ''} aria-label="Дальше">›</button></div>`;
+    };
+    const go = (d) => { const last = viewerPair ? Math.max(0, list.length - 2) : list.length - 1; const n = Math.max(0, Math.min(last, i + d)); if (n !== i) { i = n; render(); } };
+    v.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-v]');
+      if (!b) return;
+      const act = b.dataset.v;
+      if (act === 'close') close();
+      else if (act === 'pair') { viewerPair = !viewerPair; render(); }
+      else if (act === 'prev') go(-1);
+      else if (act === 'next') go(1);
+      else if (act === 'del') {
         if (!confirm('Удалить это фото?')) return;
-        await api(`/api/photos/${id}`, { method: 'DELETE' });
-        closeModal(); toast('Фото удалено'); openBody();
-      });
+        await api(`/api/photos/${list[i].id}`, { method: 'DELETE' });
+        close(); toast('Фото удалено'); openBody();
+      }
     });
+    let x0 = null, y0 = null;
+    v.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
+    v.addEventListener('touchend', (e) => {
+      if (x0 == null) return;
+      const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) go(dx < 0 ? 1 : -1);
+      else if (dy > 120 && Math.abs(dx) < 60) close(); // pull down to close
+      x0 = y0 = null;
+    }, { passive: true });
+    render();
   }
   $('#body-open').addEventListener('click', () => openBody().catch((e) => toast(e.message)));
 
@@ -1917,6 +2054,7 @@
   if (!TITLES[initial]) initial = 'journal';
   try { state.prodView = localStorage.getItem('prodView') || 'fridge'; } catch (_) { /* ignore */ }
   try { state.sort = localStorage.getItem('sort') || 'default'; } catch (_) { /* ignore */ }
+  try { state.closedShelves = JSON.parse(localStorage.getItem('closedShelves') || '[]'); } catch (_) { /* ignore */ }
   if (!SORTS[state.sort]) state.sort = 'default';
   showTab(initial);
   const fromPush = new URLSearchParams(location.search).has('checkin');

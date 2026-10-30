@@ -120,6 +120,15 @@ CREATE TABLE IF NOT EXISTS goals (
 );
 INSERT OR IGNORE INTO goals (id) VALUES (1);
 
+-- every change of the daily goals, so a past day is judged against the goals that were set back then
+CREATE TABLE IF NOT EXISTS goals_history (
+    date TEXT PRIMARY KEY,
+    kcal REAL NOT NULL,
+    protein REAL NOT NULL,
+    fat REAL NOT NULL,
+    carbs REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS weight_log (
     date TEXT PRIMARY KEY,
     kg REAL NOT NULL
@@ -236,6 +245,13 @@ def tx():
         conn.close()
 
 
+KNOWN_GOALS = [
+    ("2000-01-01", 2005, 120, 45, 280),
+    ("2026-10-21", 1990, 135, 45, 250),
+    ("2026-10-22", 2010, 140, 45, 250),
+]
+
+
 def init_db() -> None:
     with tx() as conn:
         conn.executescript(SCHEMA)
@@ -252,6 +268,14 @@ def init_db() -> None:
                 except ValueError:
                     slot = "snack"
             conn.execute("UPDATE meals SET slot=? WHERE id=?", (slot, r["id"]))
+        # first run with goals_history: the goals known from the daily backups (earlier goals were never
+        # recorded, so the oldest known set stands for everything before 21 Oct), then today's goals
+        if not conn.execute("SELECT 1 FROM goals_history LIMIT 1").fetchone():
+            conn.executemany("INSERT INTO goals_history (date, kcal, protein, fat, carbs) VALUES (?,?,?,?,?)",
+                             KNOWN_GOALS)
+            g = get_goals(conn)
+            conn.execute("INSERT OR IGNORE INTO goals_history (date, kcal, protein, fat, carbs) VALUES (?,?,?,?,?)",
+                         (today(), g["kcal"], g["protein"], g["fat"], g["carbs"]))
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -614,7 +638,14 @@ def set_goals(conn, kcal=None, protein=None, fat=None, carbs=None) -> dict:
            (("kcal", kcal), ("protein", protein), ("fat", fat), ("carbs", carbs))}
     conn.execute("UPDATE goals SET kcal=?, protein=?, fat=?, carbs=? WHERE id=1",
                  (new["kcal"], new["protein"], new["fat"], new["carbs"]))
+    conn.execute("INSERT OR REPLACE INTO goals_history (date, kcal, protein, fat, carbs) VALUES (?,?,?,?,?)",
+                 (today(), new["kcal"], new["protein"], new["fat"], new["carbs"]))
     return new
+
+
+def goals_history(conn) -> list[dict]:
+    """Goal changes, oldest first: a day uses the last row dated on or before it."""
+    return _rows(conn.execute("SELECT date, kcal, protein, fat, carbs FROM goals_history ORDER BY date"))
 
 
 def log_weight(conn, kg: float, day: str | None = None) -> dict:
@@ -939,7 +970,12 @@ def analytics(conn, days: int | None = 30, start: str | None = None, end: str | 
                        "n": r["n"] if r else 0})
         d += timedelta(days=1)
 
-    logged = [x for x in series if x["n"]]
+    # today is still going on: it stays in the series (drawn faded) but not in averages and weekdays
+    today_s = now_local().date().isoformat()
+    for x in series:
+        if x["date"] == today_s:
+            x["partial"] = True
+    logged = [x for x in series if x["n"] and not x.get("partial")]
     avg = {m: (round(sum(x[m] for x in logged) / len(logged), 1) if logged else 0) for m in MACROS}
 
     # per weekday (0 = Monday): average over logged days of that weekday
@@ -976,14 +1012,55 @@ def analytics(conn, days: int | None = 30, start: str | None = None, end: str | 
         streak += 1
         d -= timedelta(days=1)
 
-    top = _rows(conn.execute(
-        """SELECT name, COUNT(*) n, ROUND(SUM(kcal)) kcal, ROUND(SUM(protein)) protein, ROUND(SUM(fat)) fat,
-                  ROUND(SUM(carbs)) carbs
-           FROM meals WHERE meal_date BETWEEN ? AND ? AND name NOT IN ('Завтрак', 'Обед', 'Ужин', 'Перекус',
-                 'Перекус 1', 'Перекус 2', 'Перекус/Другое')
-           GROUP BY name ORDER BY n DESC, kcal DESC LIMIT 10""", (s, e)))
+    top = top_foods(conn, s, e)
     weight = _rows(conn.execute("SELECT * FROM weight_log WHERE date BETWEEN ? AND ? ORDER BY date", (s, e)))
     measurements = _rows(conn.execute("SELECT * FROM measurements WHERE date BETWEEN ? AND ? ORDER BY date", (s, e)))
     return {"start": s, "end": e, "days": len(series), "series": series, "avg": avg, "logged_days": len(logged),
             "weekday": weekday, "hours": hours, "streak": streak, "top": top, "weight": weight,
-            "measurements": measurements, "goals": get_goals(conn), "first_date": first_meal_date(conn)}
+            "measurements": measurements, "goals": get_goals(conn), "goals_history": goals_history(conn),
+            "first_date": first_meal_date(conn)}
+
+
+def _name_words(name: str) -> frozenset:
+    s = norm_key(name).replace("ё", "е")
+    s = re.sub(r"(\d)\.(\d)", r"\1,\2", s)  # 0.05% and 0,05% are the same milk
+    return frozenset(w for w in re.split(r"[^\w%,]+", s) if w)
+
+
+def top_foods(conn, start: str, end: str, limit: int = 10) -> list[dict]:
+    """Most frequent foods in a window. Spellings of one food are counted together: the same words in any
+    order or case (FatSecret history vs. new entries), and a history name whose words (3 or more) are all
+    inside a catalogue product's name, e.g. «Parmalat Молоко Безлактозное 0,05%» and
+    «Молоко безлактозное 0,05% Parmalat Comfort». The catalogue spelling wins when there is one."""
+    rows = _rows(conn.execute(
+        """SELECT name, COUNT(*) n, SUM(kcal) kcal, SUM(protein) protein, SUM(fat) fat, SUM(carbs) carbs
+           FROM meals WHERE meal_date BETWEEN ? AND ? AND name NOT IN ('Завтрак', 'Обед', 'Ужин', 'Перекус',
+                 'Перекус 1', 'Перекус 2', 'Перекус/Другое')
+           GROUP BY name""", (start, end)))
+    products = [(p["name"], _name_words(p["name"])) for p in conn.execute("SELECT name FROM products")]
+    by_words = {w: n for n, w in products}
+
+    def canon(name: str) -> tuple:
+        w = _name_words(name)
+        if w in by_words:
+            return ("p", by_words[w])
+        if len(w) >= 3:
+            hits = [n for n, pw in products if w < pw]
+            if len(hits) == 1:
+                return ("p", hits[0])
+        return ("w", w)
+
+    groups: dict = {}
+    for r in rows:
+        k = canon(r["name"])
+        g = groups.setdefault(k, {"names": {}, "n": 0, **{m: 0.0 for m in MACROS}})
+        g["names"][r["name"]] = r["n"]
+        g["n"] += r["n"]
+        for m in MACROS:
+            g[m] += r[m] or 0
+    out = []
+    for k, g in groups.items():
+        name = k[1] if k[0] == "p" else max(g["names"], key=g["names"].get)
+        out.append({"name": name, "n": g["n"], **{m: round(g[m]) for m in MACROS}})
+    out.sort(key=lambda x: (-x["n"], -x["kcal"]))
+    return out[:limit]

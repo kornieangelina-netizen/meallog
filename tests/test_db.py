@@ -118,3 +118,24 @@ class DbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnalyticsTests(unittest.TestCase):
+    setUp = DbTests.setUp
+    tearDown = DbTests.tearDown
+
+    def test_today_left_out_and_spellings_merged(self):
+        db = self.db
+        with db.tx() as c:
+            db.save_product(c, "Молоко безлактозное 0,05% Parmalat Comfort", basis="100g", kcal=32, protein=3, fat=0, carbs=5)
+            y = (db.now_local().date() - db.timedelta(days=1)).isoformat()
+            db.log_meal(c, "Parmalat Молоко Безлактозное 0.05%", 64, 6, 0, 10, when=f"{y}T09:00")
+            db.log_meal(c, "Молоко безлактозное 0,05% Parmalat Comfort", 64, 6, 0, 10, when=f"{y}T10:00")
+            db.log_meal(c, "Омлет", 200, 12, 14, 2)  # today
+            a = db.analytics(c, 7)
+            self.assertTrue(a["series"][-1]["partial"])
+            self.assertEqual(a["avg"]["kcal"], 128)
+            top = {t["name"]: t["n"] for t in a["top"]}
+            self.assertEqual(top["Молоко безлактозное 0,05% Parmalat Comfort"], 2)
+            db.set_goals(c, protein=150)
+            self.assertEqual(db.goals_history(c)[-1]["protein"], 150)
