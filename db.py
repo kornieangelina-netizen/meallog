@@ -306,7 +306,8 @@ def find_product_by_name(conn, name: str) -> dict | None:
 def search_products(conn, query: str, limit: int = 15) -> list[dict]:
     """Substring search over name and aliases, casefolded in Python (Cyrillic-safe)."""
     q = norm_key(query)
-    words = q.split()
+    # drop the ending of longer words so «мука» finds «муки», «яйца» finds «яйцо»
+    words = [w[:-1] if len(w) >= 4 else w for w in q.split()]
     out = []
     for r in conn.execute("SELECT * FROM products ORDER BY fridge_qty DESC, name"):
         hay = norm_key(r["name"] + " " + (r["aliases"] or ""))

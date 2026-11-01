@@ -27,7 +27,6 @@
 
   const state = {
     tab: 'journal',
-    prodView: 'fridge',
     shelf: 'all',        // fridge filter: all | home | delivery | ready | cook
     sort: 'default',     // product order: default | protein | carbs | fat | kcal
     sortOpen: false,     // sort chips shown under the search row
@@ -506,7 +505,7 @@
       <h3>${SLOT_ONE[slot]}${dayNote}</h3>
       <div class="seg small" id="add-tabs"><button data-t="pick" class="on">Продукты</button><button data-t="recent">Недавнее</button><button data-t="manual">Вручную</button></div>
       <div id="add-pick">
-        <input type="search" id="add-search" placeholder="Поиск по справочнику" autocomplete="off">
+        <input type="search" id="add-search" placeholder="Найти любой продукт" autocomplete="off">
         <div class="sort-chips" id="add-shelf">${ADD_SHELVES.map(([k, t]) => `<button type="button" data-f="${k}" class="${k === 'all' ? 'on' : ''}">${t}</button>`).join('')}</div>
         ${sortChips('add-sort', sort)}
         <p class="hint">Отметь всё, что съела, и поправь количество. Запишется одним нажатием.</p>
@@ -613,8 +612,9 @@
         const q = search.value.trim().toLowerCase();
         let items = state.products;
         if (shelf !== 'all') items = items.filter((p) => (shelf === 'other' ? !['home', 'delivery'].includes(shelfOf(p)) : shelfOf(p) === shelf));
-        if (q) items = items.filter((p) => (p.name + ' ' + (p.aliases || '')).toLowerCase().includes(q));
-        else items = [...items].sort((a, b) => (b.fridge_qty > 0) - (a.fridge_qty > 0) || (state.frequent.indexOf(a.id) + 1 || 99) - (state.frequent.indexOf(b.id) + 1 || 99));
+        if (q) { const ws = q.split(/\s+/).map((w) => (w.length >= 4 ? w.slice(0, -1) : w)); items = items.filter((p) => { const h = (p.name + ' ' + (p.aliases || '')).toLowerCase().replace(/ё/g, 'е'); return ws.every((w) => h.includes(w.replace(/ё/g, 'е'))); }); }
+        // without a search only what is in the fridge; the search finds the whole catalogue
+        else items = items.filter((p) => p.fridge_qty > 0 || picked.has(p.id)).sort((a, b) => (state.frequent.indexOf(a.id) + 1 || 99) - (state.frequent.indexOf(b.id) + 1 || 99));
         items = sortProducts(items, sort);
         // ticked ones stay on top so they can be adjusted
         items = [...items.filter((p) => picked.has(p.id)), ...items.filter((p) => !picked.has(p.id))];
@@ -627,7 +627,7 @@
               <span class="sub">на ${p.basis === 'portion' ? `порцию${p.grams ? ` ${fmt(p.grams)} г` : ''}` : '100 г'}${p.fridge_qty > 0 ? ` · <i>${p.basis === 'portion' && p.grams ? `${fmt(p.fridge_qty * p.grams)} г` : `${qty(p.fridge_qty)} ${p.basis === 'portion' ? 'шт' : 'г'}`} есть</i>` : ''}</span></span>
             ${a ? `<span class="amt"><input type="number" inputmode="decimal" step="any" min="0" value="${a.grams != null ? fmt(a.grams) : a.portions}" aria-label="количество"><small>${a.grams != null ? 'г' : 'порц.'}</small></span>` : ''}
           </div>`;
-        }).join('') || '<p class="muted">Ничего не нашлось. Добавь вручную.</p>';
+        }).join('') || `<p class="muted">${q ? 'Ничего не нашлось. Добавь вручную.' : 'Здесь пусто. Найди любой продукт поиском сверху.'}</p>`;
         $$('.pick', list).forEach((row) => {
           const id = Number(row.dataset.id);
           row.addEventListener('click', (e) => {
@@ -726,18 +726,14 @@
     const items = d.products;
     const box = $('#products'), chips = $('#shelf-chips');
     box.innerHTML = '';
+    // the tab shows only what is in the fridge; the search finds everything, «+ в холодильник» puts it back
     const fridge = items.filter((p) => p.fridge_qty > 0);
     const eaten = items.filter((p) => !(p.fridge_qty > 0));
-    const seg = $('#prod-seg');
-    seg.hidden = !!q;
-    seg.querySelector('[data-v=fridge] small').textContent = q ? '' : fridge.length;
-    seg.querySelector('[data-v=eaten] small').textContent = q ? '' : eaten.length;
-    seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.prodView));
     const rb = $('#open-recipes');
     const nDish = state.recipes.filter((r) => r.kind !== 'base').length, nBase = state.recipes.length - nDish;
     rb.hidden = !!q;
     rb.innerHTML = `<span class="rb-ico">📖</span><span class="grow"><b>Рецепты</b><small>${state.recipes.length ? `${nDish} ${plural(nDish, 'блюдо', 'блюда', 'блюд')}${nBase ? ` · ${nBase} ${plural(nBase, 'заготовка', 'заготовки', 'заготовок')}` : ''}` : 'пока пусто'}</small></span><span class="chev">›</span>`;
-    const fridgeView = !q && state.prodView === 'fridge';
+    const fridgeView = !q;
     // sort chips everywhere; shelf chips only for the fridge
     const shelves = Object.keys(SHELF_TITLES).map((k) => [k, fridge.filter((p) => shelfOf(p) === k).length]);
     // the sort row stays hidden behind the arrows button until it is opened or a sort is active
@@ -761,7 +757,7 @@
     }
     if (fridgeView) {
       if (!fridge.length) {
-        box.innerHTML = '<p class="empty">Холодильник пуст. Всё съеденное лежит во вкладке «Съедено», оттуда можно вернуть продукт кнопкой «+ в холодильник».</p>';
+        box.innerHTML = '<p class="empty">Холодильник пуст. Найди продукт поиском сверху и нажми «+ в холодильник».</p>';
         return;
       }
       const keys = state.shelf === 'all' ? Object.keys(SHELF_TITLES) : [state.shelf];
@@ -788,29 +784,7 @@
       }));
       return;
     }
-    // eaten: grouped by the last day it was logged, newest first; never logged go last by category
-    if (!eaten.length) { box.innerHTML = '<p class="empty">Здесь появится то, что закончилось в холодильнике.</p>'; return; }
-    if (state.sort !== 'default') { box.appendChild(plist(sorted(eaten))); return; }
-    const byDay = {};
-    const never = [];
-    for (const p of eaten) (p.last_eaten ? (byDay[p.last_eaten] = byDay[p.last_eaten] || []) : never).push(p);
-    const dayLabel = (dt) => (dt === state.today ? 'Сегодня' : dt === addDays(state.today, -1) ? 'Вчера' : shortDate(dt));
-    for (const dt of Object.keys(byDay).sort().reverse()) {
-      box.insertAdjacentHTML('beforeend', `<div class="cat">${dayLabel(dt)}</div>`);
-      box.appendChild(plist(byDay[dt]));
-    }
-    const cats = {};
-    for (const p of never) (cats[p.category || 'Прочее'] = cats[p.category || 'Прочее'] || []).push(p);
-    for (const c of Object.keys(cats).sort()) {
-      box.insertAdjacentHTML('beforeend', `<div class="cat">${esc(c)} <small>· из справочника</small></div>`);
-      box.appendChild(plist(cats[c]));
-    }
   }
-  $$('#prod-seg button').forEach((b) => b.addEventListener('click', () => {
-    state.prodView = b.dataset.v;
-    try { localStorage.setItem('prodView', state.prodView); } catch (_) { /* private mode */ }
-    loadProducts();
-  }));
   $('#open-recipes').addEventListener('click', () => openRecipes());
   $('#sort-btn').addEventListener('click', () => {
     if (state.sort !== 'default') { state.sort = 'default'; state.sortOpen = false; try { localStorage.setItem('sort', 'default'); } catch (_) { /* private mode */ } }
@@ -2153,7 +2127,6 @@
   let initial = 'journal';
   try { initial = localStorage.getItem('tab') || 'journal'; } catch (_) { /* ignore */ }
   if (!TITLES[initial]) initial = 'journal';
-  try { state.prodView = localStorage.getItem('prodView') || 'fridge'; } catch (_) { /* ignore */ }
   try { state.sort = localStorage.getItem('sort') || 'default'; } catch (_) { /* ignore */ }
   try { state.closedShelves = JSON.parse(localStorage.getItem('closedShelves') || '[]'); } catch (_) { /* ignore */ }
   if (!SORTS[state.sort]) state.sort = 'default';
