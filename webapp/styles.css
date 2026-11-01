@@ -33,13 +33,12 @@ h3 { font-size: 13px; margin: 20px 2px 8px; color: var(--muted); font-weight: 60
 h3 small { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--faint); margin-left: 6px; }
 
 /* ambient glows, as on the reference, but quiet */
-.glow { position: fixed; border-radius: 50%; pointer-events: none; z-index: 0; filter: blur(70px); }
-.glow-a { width: 360px; height: 360px; left: -140px; top: -120px; background: rgba(61, 96, 255, .22); }
-.glow-b { width: 320px; height: 320px; right: -140px; bottom: 60px; background: rgba(255, 122, 40, .13); }
+.glow { position: fixed; border-radius: 50%; pointer-events: none; z-index: 0; }
+.glow-a { width: 560px; height: 560px; left: -260px; top: -240px; background: radial-gradient(closest-side, rgba(61, 96, 255, .2), rgba(61, 96, 255, 0)); }
+.glow-b { width: 500px; height: 500px; right: -260px; bottom: -40px; background: radial-gradient(closest-side, rgba(255, 122, 40, .11), rgba(255, 122, 40, 0)); }
 main, header, nav { position: relative; z-index: 1; }
 
-.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.card { background: var(--card-solid); border: 1px solid var(--line); border-radius: var(--radius); }
 
 /* ---------- header + calendar ---------- */
 .top { position: sticky; top: 0; z-index: 5; padding: calc(10px + env(safe-area-inset-top)) 16px 8px;
@@ -682,3 +681,17 @@ body.page-open { overflow: hidden; }
 .similar button { border: 0; background: var(--card-2); color: var(--text); border-radius: 10px; padding: 6px 10px; font-size: 13px; text-align: left; font-family: inherit; }
 .v-stage img { background: none; }
 #body-open.body-open { padding: 14px 16px; margin: 0 0 10px; }
+
+/* 1 Nov: nothing behind an open sheet or viewer scrolls along; sheets keep their own scroll */
+body.modal-open { overflow: hidden; }
+.sheet { overscroll-behavior: contain; }
+.page { overscroll-behavior: contain; }
+.viewer { touch-action: none; }
+.v-angles { display: flex; gap: 6px; justify-content: center; margin-top: 10px; flex: none; }
+.v-angles button { border: 1px solid var(--line); background: var(--card-2); color: var(--muted); border-radius: 16px; padding: 6px 12px; font-size: 13px; font-family: inherit; }
+.v-angles button.on { color: var(--text); border-color: rgba(124, 140, 255, .45); background: var(--accent-soft); }
+.v-img { flex: 1; min-height: 0; overflow: hidden; border-radius: 10px; display: flex; }
+.v-img img { flex: 1; min-width: 0; height: 100%; width: 100%; object-fit: contain; transform-origin: center; will-change: transform; }
+.v-bottom .v-pos { font-size: 12px; text-align: center; }
+.viewer > .v-del { flex: none; align-self: center; margin-top: 6px; padding: 6px; }
+.pair-h { font-size: 12px; color: var(--muted); margin: 6px 2px 0; }

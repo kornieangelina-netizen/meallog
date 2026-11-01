@@ -160,9 +160,15 @@
   function openModal(html, onMount) {
     $('#modal-body').innerHTML = html;
     modal.hidden = false;
+    document.body.classList.add('modal-open');
     onMount && onMount($('#modal-body'));
   }
-  function closeModal() { modal.hidden = true; $('#modal-body').innerHTML = ''; }
+  function closeModal() { modal.hidden = true; $('#modal-body').innerHTML = ''; document.body.classList.remove('modal-open'); swallowClicks(); }
+  // iPhone sends a late "click" after a touch: when a layer closes under the finger, that click would land
+  // on whatever is beneath (e.g. the page's back button). Swallow clicks for a moment after any close.
+  let swallowUntil = 0;
+  function swallowClicks(ms = 400) { swallowUntil = Date.now() + ms; }
+  document.addEventListener('click', (e) => { if (Date.now() < swallowUntil) { e.stopPropagation(); e.preventDefault(); } }, true);
   modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 
   // ---------- tabs ----------
@@ -469,26 +475,39 @@
 
   // add sheet: tick several foods from the fridge / catalogue or from recent entries, set each amount and
   // log them all at once; or type a meal by hand
+  // amounts are typed in grams whenever the weight is known; the default is the whole dish:
+  // a portion's weight, or all that is left of a home-cooked dish
+  const inGrams = (p) => p.basis !== 'portion' || Number(p.grams) > 0;
   function defaultAmount(p) {
-    if (p.basis === 'portion') return { portions: 1 };
-    return { grams: p.grams ? Number(p.grams) : 100 };
+    if (p.basis === 'portion') return p.grams ? { grams: Number(p.grams) } : { portions: 1 };
+    if (p.grams) return { grams: Number(p.grams) };
+    if (shelfOf(p) === 'home' && p.fridge_qty > 0) return { grams: Number(p.fridge_qty) };
+    return { grams: 100 };
+  }
+  // tapping a number field empties it, so a new amount is typed straight away; leaving it empty brings the
+  // old number back
+  function clearOnFocus(inp) {
+    inp.addEventListener('focus', () => { inp.dataset.prev = inp.value; inp.placeholder = inp.value; inp.value = ''; });
+    inp.addEventListener('blur', () => { if (inp.value === '' && inp.dataset.prev) { inp.value = inp.dataset.prev; inp.dispatchEvent(new Event('input')); } });
   }
   const amountMacros = (p, a) => {
     const k = p.basis === 'portion' ? (a.portions != null ? a.portions : (a.grams || 0) / (p.grams || 1)) : (a.grams || 0) / 100;
     return Object.fromEntries(MACROS.map((m) => [m, p[m] * k]));
   };
 
+  const ADD_SHELVES = [['all', 'Всё'], ['home', 'Моя готовка'], ['delivery', 'Доставка'], ['other', 'Другие продукты']];
   function openAddSheet(slot) {
     slot = slot || slotForHour(new Date().getHours());
     const dayNote = state.date === state.today ? '' : ` · ${dateTitle(state.date).toLowerCase()}`;
     const picked = new Map();   // product id -> {grams} | {portions}
     const pickedRecent = new Set();
-    let sort = 'default', recent = null;
+    let sort = 'default', recent = null, shelf = 'all';
     openModal(`
       <h3>${SLOT_ONE[slot]}${dayNote}</h3>
       <div class="seg small" id="add-tabs"><button data-t="pick" class="on">Продукты</button><button data-t="recent">Недавнее</button><button data-t="manual">Вручную</button></div>
       <div id="add-pick">
         <input type="search" id="add-search" placeholder="Поиск по справочнику" autocomplete="off">
+        <div class="sort-chips" id="add-shelf">${ADD_SHELVES.map(([k, t]) => `<button type="button" data-f="${k}" class="${k === 'all' ? 'on' : ''}">${t}</button>`).join('')}</div>
         ${sortChips('add-sort', sort)}
         <p class="hint">Отметь всё, что съела, и поправь количество. Запишется одним нажатием.</p>
         <div class="pick-list" id="add-list"></div>
@@ -593,6 +612,7 @@
       const render = () => {
         const q = search.value.trim().toLowerCase();
         let items = state.products;
+        if (shelf !== 'all') items = items.filter((p) => (shelf === 'other' ? !['home', 'delivery'].includes(shelfOf(p)) : shelfOf(p) === shelf));
         if (q) items = items.filter((p) => (p.name + ' ' + (p.aliases || '')).toLowerCase().includes(q));
         else items = [...items].sort((a, b) => (b.fridge_qty > 0) - (a.fridge_qty > 0) || (state.frequent.indexOf(a.id) + 1 || 99) - (state.frequent.indexOf(b.id) + 1 || 99));
         items = sortProducts(items, sort);
@@ -602,8 +622,10 @@
           const a = picked.get(p.id);
           return `<div class="pick ${a ? 'on' : ''}" data-id="${p.id}">
             <span class="tick"></span>
-            <span class="grow"><span class="name">${esc(p.name)} ${sortBadge(p, sort)}</span><span class="sub">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${p.basis === 'portion' ? 'порцию' : '100 г'}${p.fridge_qty > 0 ? ` · <i>${qty(p.fridge_qty)} ${p.basis === 'portion' ? 'шт' : 'г'} есть</i>` : ''}</span></span>
-            ${a ? `<span class="amt"><input type="number" inputmode="decimal" step="any" min="0" value="${p.basis === 'portion' ? a.portions : a.grams}" aria-label="количество"><small>${p.basis === 'portion' ? 'порц.' : 'г'}</small></span>` : ''}
+            <span class="grow"><span class="name">${esc(p.name)} ${sortBadge(p, sort)}</span>
+              <span class="pmac"><span class="pk"><b>${fmt(p.kcal)}</b> ккал</span><span><i class="dot protein"></i>${fmt(p.protein)}</span><span><i class="dot fat"></i>${fmt(p.fat)}</span><span><i class="dot carbs"></i>${fmt(p.carbs)}</span></span>
+              <span class="sub">на ${p.basis === 'portion' ? `порцию${p.grams ? ` ${fmt(p.grams)} г` : ''}` : '100 г'}${p.fridge_qty > 0 ? ` · <i>${p.basis === 'portion' && p.grams ? `${fmt(p.fridge_qty * p.grams)} г` : `${qty(p.fridge_qty)} ${p.basis === 'portion' ? 'шт' : 'г'}`} есть</i>` : ''}</span></span>
+            ${a ? `<span class="amt"><input type="number" inputmode="decimal" step="any" min="0" value="${a.grams != null ? fmt(a.grams) : a.portions}" aria-label="количество"><small>${a.grams != null ? 'г' : 'порц.'}</small></span>` : ''}
           </div>`;
         }).join('') || '<p class="muted">Ничего не нашлось. Добавь вручную.</p>';
         $$('.pick', list).forEach((row) => {
@@ -615,14 +637,20 @@
             render(); renderBar();
           });
           const inp = row.querySelector('.amt input');
-          if (inp) inp.addEventListener('input', () => {
-            const p = state.products.find((x) => x.id === id), v = Number(inp.value) || 0;
-            picked.set(id, p.basis === 'portion' ? { portions: v } : { grams: v });
-            renderBar();
-          });
+          if (inp) {
+            clearOnFocus(inp);
+            inp.addEventListener('input', () => {
+              const p = state.products.find((x) => x.id === id), v = Number(inp.value) || 0;
+              picked.set(id, inGrams(p) ? { grams: v } : { portions: v });
+              renderBar();
+            });
+          }
         });
       };
       search.addEventListener('input', render);
+      $$('#add-shelf button', el).forEach((b) => b.addEventListener('click', () => {
+        shelf = b.dataset.f; $$('#add-shelf button', el).forEach((x) => x.classList.toggle('on', x === b)); render();
+      }));
       $$('#add-sort button', el).forEach((b) => b.addEventListener('click', () => {
         sort = b.dataset.s; $$('#add-sort button', el).forEach((x) => x.classList.toggle('on', x === b)); render();
       }));
@@ -658,6 +686,7 @@
         <button class="btn ghost danger" type="button" id="edit-del">Удалить запись</button>
       </form>`, (el) => {
       const f = el.querySelector('form');
+      clearOnFocus(f.grams);
       let manual = false;
       ['kcal', 'protein', 'fat', 'carbs'].forEach((k) => f[k].addEventListener('input', () => { manual = true; }));
       f.grams.addEventListener('input', () => {
@@ -844,17 +873,21 @@
     const pg = Number(p.grams) || 0;           // weight of one portion (may be unknown)
     const both = pg > 0;                        // can convert grams <-> portions
     slot = slot || slotForHour(new Date().getHours());
-    const chips = (isPortion || both)
-      ? [['¼', 0.25], ['½', 0.5], ['¾', 0.75], ['1', 1], ['1½', 1.5], ['2', 2]].map(([t, v]) => `<button type="button" data-portions="${v}">${t} порц.</button>`)
-      : [50, 100, 150, 200, 250, 300].map((g) => `<button type="button" data-grams="${g}">${g} г</button>`);
+    // grams whenever the weight is known; portions only for a portion of unknown weight
+    const def = defaultAmount(p);
+    const chips = both
+      ? [['½', 0.5], ['вся', 1], ['1½', 1.5], ['2', 2]].map(([t, v]) => `<button type="button" data-grams="${Math.round(v * pg)}">${fmt(v * pg)} г · ${t}</button>`)
+      : isPortion
+        ? [['½', 0.5], ['1', 1], ['1½', 1.5], ['2', 2]].map(([t, v]) => `<button type="button" data-portions="${v}">${t} порц.</button>`)
+        : [...(def.grams && ![50, 100, 150, 200, 250, 300].includes(def.grams) ? [def.grams] : []), 50, 100, 150, 200, 250, 300].map((g) => `<button type="button" data-grams="${g}">${fmt(g)} г${g === def.grams && shelfOf(p) === 'home' && p.fridge_qty > 0 ? ' · всё' : ''}</button>`);
     openModal(`
       <h3>${esc(p.name)}</h3>
       <p class="muted" style="margin:-6px 0 10px">${fmt(p.kcal)} ккал · Б ${fmt(p.protein)} · Ж ${fmt(p.fat)} · У ${fmt(p.carbs)} на ${isPortion ? `порцию${pg ? ` ${fmt(pg)} г` : ''}` : '100 г'}${p.fridge_qty > 0 ? ` · в холодильнике ${qty(p.fridge_qty)} ${isPortion ? 'шт' : 'г'}` : ''}</p>
       <div class="quick" id="amount-chips">${chips.join('')}</div>
       <form class="form" id="log-form">
         <div class="row2">
-          ${isPortion || both ? `<label>Порций <input name="portions" type="number" inputmode="decimal" step="any" min="0" value="${preset && preset.portions ? preset.portions : preset && preset.grams && both ? fmt(preset.grams / pg, 2) : isPortion ? 1 : ''}"></label>` : ''}
-          ${!isPortion || both ? `<label>Граммов <input name="grams" type="number" inputmode="decimal" step="any" min="0" value="${preset && preset.grams ? preset.grams : preset && preset.portions && both ? fmt(preset.portions * pg) : isPortion ? (pg || '') : (pg || 100)}"></label>` : ''}
+          ${isPortion && !both ? `<label>Порций <input name="portions" type="number" inputmode="decimal" step="any" min="0" value="${preset && preset.portions ? preset.portions : 1}"></label>` : ''}
+          ${!isPortion || both ? `<label>Граммов <input name="grams" type="number" inputmode="decimal" step="any" min="0" value="${preset && preset.grams ? preset.grams : preset && preset.portions && both ? fmt(preset.portions * pg) : def.grams}"></label>` : ''}
         </div>
         <div class="row2"><label>Время <input name="time" type="time" value="${state.date === state.today ? nowHM() : '12:00'}"></label>
           <label>Приём <select name="slot">${SLOTS.map((s) => `<option value="${s}" ${s === slot ? 'selected' : ''}>${SLOT_ONE[s]}</option>`).join('')}</select></label></div>
@@ -863,6 +896,8 @@
       </form>`, (el) => {
       const f = el.querySelector('form');
       const pIn = f.portions, gIn = f.grams;
+      if (gIn) clearOnFocus(gIn);
+      if (pIn) clearOnFocus(pIn);
       const amount = () => {
         const portions = pIn ? Number(pIn.value) : 0, grams = gIn ? Number(gIn.value) : 0;
         if (isPortion) return { portions: portions || (both && grams ? grams / pg : 0), grams: grams || (portions * pg) };
@@ -887,8 +922,8 @@
       pIn && pIn.addEventListener('input', () => { if (both && gIn) gIn.value = pIn.value ? fmt(Number(pIn.value) * pg) : ''; preview(); });
       gIn && gIn.addEventListener('input', () => { if (both && pIn) pIn.value = gIn.value ? fmt(Number(gIn.value) / pg, 2) : ''; preview(); });
       $$('#amount-chips button', el).forEach((b) => b.addEventListener('click', () => {
-        if (b.dataset.portions) { pIn.value = b.dataset.portions; if (both && gIn) gIn.value = fmt(Number(b.dataset.portions) * pg); }
-        else { gIn.value = b.dataset.grams; if (both && pIn) pIn.value = fmt(Number(b.dataset.grams) / pg, 2); }
+        if (b.dataset.portions) pIn.value = b.dataset.portions;
+        else gIn.value = b.dataset.grams;
         preview();
       }));
       preview();
@@ -1804,8 +1839,9 @@
     if (!bodyCmp || !withData.some((d) => d.date === bodyCmp[0]) || !withData.some((d) => d.date === bodyCmp[1])) {
       bodyCmp = withData.length ? [withData[0].date, withData[withData.length - 1].date] : null;
     }
-    const allPhotos = [...withData].reverse().flatMap((d) => d.photos.map((p) => ({ ...p, date: d.date })));
-    const view = (id) => viewPhotos(allPhotos, Number(id));
+    // photo dates oldest first; a photo's place inside its date is its angle (front, back, side)
+    const photoDays = withData.filter((d) => d.photos.length).map((d) => ({ date: d.date, photos: d.photos }));
+    const view = (id, cmp) => viewPhotos(photoDays, Number(id), cmp);
     const opt = (sel) => withData.map((d) => `<option value="${d.date}" ${d.date === sel ? 'selected' : ''}>${longDate(d.date)}</option>`).join('');
     openPage('Фото и замеры', `
       ${withData.length > 1 ? `<h3>Сравнить</h3>
@@ -1838,13 +1874,13 @@
         let pairs = '';
         for (let i = 0; i < n; i++) {
           const cell = (p) => (p ? `<img src="${photoUrl(p)}" data-id="${p.id}" alt="">` : '<div class="nophoto">нет фото</div>');
-          pairs += `<div class="pair">${cell(A.photos[i])}${cell(B.photos[i])}</div>`;
+          pairs += `<div class="pair-h">${angleName(i)}</div><div class="pair">${cell(A.photos[i])}${cell(B.photos[i])}</div>`;
         }
         const span = daysBetween(A.date, B.date);
         out.innerHTML = `<table class="dtable cmp-t"><tr><td></td><td>${shortDate(A.date)}</td><td>${shortDate(B.date)}</td><td>разница</td></tr>${rows}</table>
           <p class="muted">Между датами ${Math.abs(span)} ${plural(Math.abs(span), 'день', 'дня', 'дней')}.</p>
           ${n ? `<div class="pairs">${pairs}</div>` : ''}`;
-        $$('img', out).forEach((im) => im.addEventListener('click', () => view(im.dataset.id)));
+        $$('img', out).forEach((im) => im.addEventListener('click', () => view(im.dataset.id, [A.date, B.date])));
       };
       ['a', 'b'].forEach((w, i) => { const s = $(`#cmp-${w}`, el); s && s.addEventListener('change', () => { bodyCmp[i] = s.value; renderCmp(); }); });
       renderCmp();
@@ -1881,34 +1917,58 @@
     });
   }
 
-  // full-screen photo viewer: swipe (or the arrows) through every photo; «Два рядом» shows the photo and the
-  // next one side by side, and swiping then moves the pair by one photo
+  // full-screen photo viewer. Swiping keeps the angle and moves to the previous / next date, the chips
+  // switch the angle. «Два рядом»: this date and the next one side by side. Opened from «Сравнить»: the two
+  // chosen dates side by side, swiping changes the angle. Pinch or double-tap zooms (both photos together).
+  const ANGLES = ['Спереди', 'Сзади', 'Сбоку'];
+  const angleName = (i) => ANGLES[i] || `Фото ${i + 1}`;
   let viewerPair = false;
-  function viewPhotos(list, id) {
-    if (!list.length) return;
-    let i = Math.max(0, list.findIndex((p) => p.id === id));
+  function viewPhotos(days, id, cmp) {
+    if (!days.length) return;
+    let di = Math.max(0, days.findIndex((d) => d.photos.some((p) => p.id === id)));
+    let ai = Math.max(0, days[di].photos.findIndex((p) => p.id === id));
+    const mode = () => (cmp ? 'cmp' : viewerPair ? 'pair' : 'single');
+    const nAngles = Math.max(...days.map((d) => d.photos.length));
+    const dayOf = (date) => days.find((d) => d.date === date);
     const v = document.createElement('div');
     v.className = 'viewer';
     document.body.appendChild(v);
-    document.body.classList.add('page-open');
-    const close = () => { v.remove(); if ($('#page').hidden) document.body.classList.remove('page-open'); };
-    const img = (p) => (p ? `<figure><img src="${photoUrl(p)}" alt=""><figcaption>${shortDate(p.date)}</figcaption></figure>` : '<figure class="none"><div class="nophoto">дальше фото нет</div></figure>');
-    const render = () => {
-      const last = viewerPair ? Math.max(0, list.length - 2) : list.length - 1;
-      i = Math.min(i, last);
-      const cur = list[i];
-      v.innerHTML = `<div class="v-top">
-          <button type="button" class="v-btn" data-v="close" aria-label="Закрыть">✕</button>
-          <span class="v-pos">${viewerPair ? `${i + 1}–${Math.min(i + 2, list.length)}` : i + 1} из ${list.length}</span>
-          <button type="button" class="v-mode ${viewerPair ? 'on' : ''}" data-v="pair">Два рядом</button></div>
-        <div class="v-stage ${viewerPair ? 'pair' : ''}">${img(cur)}${viewerPair ? img(list[i + 1]) : ''}</div>
-        <div class="v-bottom">
-          <button type="button" class="v-btn" data-v="prev" ${i === 0 ? 'disabled' : ''} aria-label="Назад">‹</button>
-          ${viewerPair ? '' : '<button type="button" class="v-del" data-v="del">Удалить фото</button>'}
-          <button type="button" class="v-btn" data-v="next" ${i >= last ? 'disabled' : ''} aria-label="Дальше">›</button></div>`;
+    document.body.classList.add('modal-open');
+    let z = { s: 1, x: 0, y: 0 };
+    const applyZoom = () => $$('.v-stage img', v).forEach((im) => { im.style.transform = `translate(${z.x}px, ${z.y}px) scale(${z.s})`; });
+    const resetZoom = () => { z = { s: 1, x: 0, y: 0 }; applyZoom(); };
+    const close = () => { v.remove(); document.body.classList.remove('modal-open'); swallowClicks(); };
+    const img = (d, i) => {
+      const p = d && d.photos[i];
+      return `<figure>${p ? `<div class="v-img"><img src="${photoUrl(p)}" alt="" draggable="false"></div>` : '<div class="nophoto">нет фото</div>'}<figcaption>${d ? longDate(d.date) : ''}</figcaption></figure>`;
     };
-    const go = (d) => { const last = viewerPair ? Math.max(0, list.length - 2) : list.length - 1; const n = Math.max(0, Math.min(last, i + d)); if (n !== i) { i = n; render(); } };
+    const render = () => {
+      const m = mode();
+      if (m === 'pair') di = Math.min(di, Math.max(0, days.length - 2));
+      const shown = m === 'cmp' ? [dayOf(cmp[0]), dayOf(cmp[1])] : m === 'pair' ? [days[di], days[di + 1]] : [days[di]];
+      const canPrev = m === 'cmp' ? ai > 0 : di > 0;
+      const canNext = m === 'cmp' ? ai < nAngles - 1 : di < days.length - (m === 'pair' ? 2 : 1);
+      v.innerHTML = `<div class="v-top">
+          ${m === 'cmp' ? '<span class="v-pos">Сравнение дат</span>' : `<button type="button" class="v-mode ${m === 'pair' ? 'on' : ''}" data-v="pair">Два рядом</button>`}
+          <button type="button" class="v-btn" data-v="close" aria-label="Закрыть">✕</button></div>
+        <div class="v-angles">${Array.from({ length: nAngles }, (_, i) => `<button type="button" data-a="${i}" class="${i === ai ? 'on' : ''}">${angleName(i)}</button>`).join('')}</div>
+        <div class="v-stage ${shown.length > 1 ? 'pair' : ''}">${shown.map((d) => img(d, ai)).join('')}</div>
+        <div class="v-bottom">
+          <button type="button" class="v-btn" data-v="prev" ${canPrev ? '' : 'disabled'} aria-label="Назад">‹</button>
+          <span class="v-pos">${m === 'cmp' ? 'листай: другой ракурс' : 'листай: тот же ракурс, другая дата'}</span>
+          <button type="button" class="v-btn" data-v="next" ${canNext ? '' : 'disabled'} aria-label="Дальше">›</button></div>
+        ${m === 'single' && days[di].photos[ai] ? '<button type="button" class="v-del" data-v="del">Удалить это фото</button>' : ''}`;
+      z = { s: 1, x: 0, y: 0 };
+    };
+    const go = (d) => {
+      if (cmp) { const n = Math.max(0, Math.min(nAngles - 1, ai + d)); if (n !== ai) { ai = n; render(); } return; }
+      const last = days.length - (mode() === 'pair' ? 2 : 1);
+      const n = Math.max(0, Math.min(Math.max(0, last), di + d));
+      if (n !== di) { di = n; render(); }
+    };
     v.addEventListener('click', async (e) => {
+      const ab = e.target.closest('[data-a]');
+      if (ab) { ai = Number(ab.dataset.a); render(); return; }
       const b = e.target.closest('[data-v]');
       if (!b) return;
       const act = b.dataset.v;
@@ -1918,19 +1978,45 @@
       else if (act === 'next') go(1);
       else if (act === 'del') {
         if (!confirm('Удалить это фото?')) return;
-        await api(`/api/photos/${list[i].id}`, { method: 'DELETE' });
+        await api(`/api/photos/${days[di].photos[ai].id}`, { method: 'DELETE' });
         close(); toast('Фото удалено'); openBody();
       }
     });
-    let x0 = null, y0 = null;
-    v.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
-    v.addEventListener('touchend', (e) => {
-      if (x0 == null) return;
-      const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
-      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) go(dx < 0 ? 1 : -1);
-      else if (dy > 120 && Math.abs(dx) < 60) close(); // pull down to close
-      x0 = y0 = null;
+    // touch: one finger swipes (or pans a zoomed photo), two fingers pinch, a double tap zooms in / out
+    let t0 = null, pinch = null, lastTap = 0;
+    const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    v.addEventListener('touchstart', (e) => {
+      if (!e.target.closest('.v-stage')) { t0 = null; return; }
+      if (e.touches.length === 2) { pinch = { d: dist(e.touches[0], e.touches[1]), s: z.s }; t0 = null; return; }
+      t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, zx: z.x, zy: z.y };
     }, { passive: true });
+    v.addEventListener('touchmove', (e) => {
+      if (pinch && e.touches.length === 2) {
+        e.preventDefault();
+        z.s = Math.max(1, Math.min(5, pinch.s * dist(e.touches[0], e.touches[1]) / pinch.d));
+        if (z.s === 1) { z.x = 0; z.y = 0; }
+        applyZoom();
+      } else if (t0 && z.s > 1 && e.touches.length === 1) {
+        e.preventDefault();
+        z.x = t0.zx + e.touches[0].clientX - t0.x; z.y = t0.zy + e.touches[0].clientY - t0.y;
+        applyZoom();
+      } else if (t0) e.preventDefault(); // no page bounce under the viewer
+    }, { passive: false });
+    v.addEventListener('touchend', (e) => {
+      if (pinch) { if (e.touches.length < 2) pinch = null; return; }
+      if (!t0) return;
+      const dx = e.changedTouches[0].clientX - t0.x, dy = e.changedTouches[0].clientY - t0.y;
+      const start = t0; t0 = null;
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+        const now = Date.now();
+        if (now - lastTap < 300) { if (z.s > 1) resetZoom(); else { z.s = 2.5; applyZoom(); } lastTap = 0; } else lastTap = now;
+        return;
+      }
+      void start;
+      if (z.s > 1) return; // zoomed: the finger pans, it does not flip photos
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) go(dx < 0 ? 1 : -1);
+      else if (dy > 120 && Math.abs(dx) < 60) { e.preventDefault(); close(); } // pull down to close
+    }, { passive: false });
     render();
   }
   $('#body-open').addEventListener('click', () => openBody().catch((e) => toast(e.message)));
