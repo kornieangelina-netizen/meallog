@@ -576,6 +576,70 @@ def log_product(conn, product_id: int, portions: float | None = None, grams: flo
                     portions=vals["portions"], fridge_delta=deduct, slot=slot)
 
 
+# --------------------------------------------------------------------------- #
+# Calories vs P/F/C: 1 g protein or carbs = 4 kcal, 1 g fat = 9 kcal. A label or an estimate whose kcal
+# disagrees with its own P/F/C (sugar alcohols, typos, wrong basis) is flagged, so it can be fixed.
+# --------------------------------------------------------------------------- #
+
+KCAL_OFF_ABS = 10     # kcal
+KCAL_OFF_REL = 0.10   # share of the larger of the two
+
+
+def kcal_by_macros(x: dict) -> float:
+    return 4 * float(x.get("protein") or 0) + 9 * float(x.get("fat") or 0) + 4 * float(x.get("carbs") or 0)
+
+
+def kcal_check(x: dict) -> dict | None:
+    """None when kcal agrees with P/F/C, else {kcal, by_macros, diff}."""
+    k, c = float(x.get("kcal") or 0), kcal_by_macros(x)
+    d = k - c
+    if abs(d) >= KCAL_OFF_ABS and abs(d) >= KCAL_OFF_REL * max(k, c):
+        return {"kcal": round(k, 1), "by_macros": round(c, 1), "diff": round(d, 1)}
+    return None
+
+
+def kcal_mismatches(conn, days: int | None = 30) -> dict:
+    """Catalogue items and diary entries (last `days` days, all when None) whose kcal disagree with P/F/C."""
+    prods = []
+    for p in _rows(conn.execute("SELECT * FROM products ORDER BY name")):
+        c = kcal_check(p)
+        if c:
+            prods.append({"id": p["id"], "name": p["name"], "basis": p["basis"], "protein": p["protein"],
+                          "fat": p["fat"], "carbs": p["carbs"], **c})
+    q, args = "SELECT * FROM meals", ()
+    if days:
+        q, args = q + " WHERE meal_date >= ?", ((now_local().date() - timedelta(days=days)).isoformat(),)
+    meals = []
+    for m in _rows(conn.execute(q + " ORDER BY logged_at", args)):
+        c = kcal_check(m)
+        if c:
+            meals.append({"id": m["id"], "meal_date": m["meal_date"], "name": m["name"], "product_id": m["product_id"],
+                          "protein": m["protein"], "fat": m["fat"], "carbs": m["carbs"], **c})
+    return {"products": prods, "meals": meals}
+
+
+def fix_kcal(conn, meal_ids: list[int] | None = None, product_ids: list[int] | None = None,
+             with_products: bool = True) -> dict:
+    """Set kcal = 4P + 9F + 4C on the given diary entries and catalogue items, only where they disagree.
+    with_products: also fix the catalogue item each fixed entry came from, so new entries come out right."""
+    fixed_m, fixed_p = [], []
+    pids = set(int(i) for i in (product_ids or []))
+    for mid in meal_ids or []:
+        m = get_meal(conn, int(mid))
+        if m and kcal_check(m):
+            conn.execute("UPDATE meals SET kcal=? WHERE id=?", (round(kcal_by_macros(m), 1), m["id"]))
+            fixed_m.append(m["id"])
+            if with_products and m.get("product_id"):
+                pids.add(int(m["product_id"]))
+    for pid in sorted(pids):
+        p = get_product(conn, pid)
+        if p and kcal_check(p):
+            conn.execute("UPDATE products SET kcal=?, updated_at=? WHERE id=?",
+                         (round(kcal_by_macros(p), 1), now_local().isoformat(timespec="seconds"), pid))
+            fixed_p.append(pid)
+    return {"meals": fixed_m, "products": fixed_p}
+
+
 def get_meal(conn, meal_id: int) -> dict | None:
     return _row(conn.execute("SELECT * FROM meals WHERE id=?", (meal_id,)).fetchone())
 
