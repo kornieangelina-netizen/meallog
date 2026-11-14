@@ -695,3 +695,18 @@ body.modal-open { overflow: hidden; }
 .v-bottom .v-pos { font-size: 12px; text-align: center; }
 .viewer > .v-del { flex: none; align-self: center; margin-top: 6px; padding: 6px; }
 .pair-h { font-size: 12px; color: var(--muted); margin: 6px 2px 0; }
+
+/* calories that disagree with P/F/C */
+.koff { display: inline-grid; place-items: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%;
+  background: rgba(255, 147, 51, .18); color: var(--carbs); font: 700 11px/1 inherit; font-style: normal; vertical-align: 1px; }
+.kcal-note { margin-top: 10px; padding: 12px 14px; display: flex; gap: 12px; align-items: center;
+  border: 1px solid rgba(255, 147, 51, .35); font-size: 13.5px; color: var(--muted); }
+.kcal-note b { color: var(--text); }
+.kcal-note .btn { flex: none; width: auto; margin: 0; padding: 9px 14px; font-size: 13.5px; }
+.kcal-check { display: flex; gap: 10px; align-items: center; margin: 6px 0 0; padding: 9px 11px; border-radius: var(--radius-s);
+  background: rgba(255, 147, 51, .1); border: 1px solid rgba(255, 147, 51, .3); font-size: 13px; color: var(--muted); }
+.kcal-check[hidden] { display: none; }
+.kcal-check b { color: var(--text); }
+.kcal-check button { flex: none; border: 0; border-radius: 10px; padding: 7px 11px; background: rgba(255, 147, 51, .22);
+  color: var(--text); font-size: 13px; cursor: pointer; }
+@media (max-width: 420px) { .kcal-note { flex-direction: column; align-items: stretch; } }

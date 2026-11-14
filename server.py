@@ -59,6 +59,10 @@ INSTRUCTIONS = f"""Ты ведёшь личный дневник питания 
    передай slot; иначе он определится по времени. Перекусов в день может быть сколько угодно.
 8. Рецепт («приготовила ...», «сварила ... из ...») сохраняй через save_recipe: ингредиенты с граммами и
    вес готового блюда. Это создаёт позицию справочника «на 100 г готового», из неё потом логируют граммы.
+9. Калории должны сходиться с БЖУ (Б×4 + Ж×9 + У×4). Если в ответе инструмента есть kcal_warning, значит
+   ккал заметно расходятся с БЖУ: перепроверь этикетку или оценку. Если БЖУ верны, а ккал нет (например,
+   сахарозаменители в составе или опечатка), исправь ккал на значение по БЖУ и коротко скажи об этом.
+   Найти и исправить все такие места: find_kcal_mismatches и fix_kcal.
 {USER_RULES}"""
 
 mcp = MCPServer("MealLog", instructions=INSTRUCTIONS)
@@ -77,6 +81,21 @@ def _public_product(p: dict) -> dict:
 def _public_meal(m: dict) -> dict:
     keys = ("id", "logged_at", "meal_date", "slot", "name", "description", "grams", "kcal", "protein", "fat", "carbs")
     return {k: m.get(k) for k in keys}
+
+
+def _kcal_warning(x: dict, what: str = "") -> str | None:
+    c = db.kcal_check(x)
+    if not c:
+        return None
+    return (f"{what or x.get('name', '')}: ккал {c['kcal']:g}, а по БЖУ (Б×4+Ж×9+У×4) выходит {c['by_macros']:g} "
+            f"(разница {c['diff']:+g}). Перепроверь; если БЖУ верны, исправь ккал на {c['by_macros']:g}.")
+
+
+def _with_warning(out: dict, *warnings: str | None) -> dict:
+    w = [x for x in warnings if x]
+    if w:
+        out["kcal_warning"] = " ".join(w)
+    return out
 
 
 @mcp.tool()
@@ -104,7 +123,8 @@ def log_product(product_id: int, portions: float | None = None, grams: float | N
     with db.tx() as conn:
         meal = db.log_product(conn, product_id, portions=portions, grams=grams, when=when, slot=slot)
         summary = db.day_summary(conn, meal["meal_date"])
-    return {"meal": _public_meal(meal), "day_totals": summary["totals"], "left_to_goal": summary["left"]}
+    return _with_warning({"meal": _public_meal(meal), "day_totals": summary["totals"], "left_to_goal": summary["left"]},
+                         _kcal_warning(meal))
 
 
 @mcp.tool()
@@ -121,7 +141,8 @@ def log_meal(name: str, kcal: float, protein: float, fat: float, carbs: float,
         meal = db.log_meal(conn, name, kcal, protein, fat, carbs, grams=grams, description=description, when=when,
                            slot=slot)
         summary = db.day_summary(conn, meal["meal_date"])
-    return {"meal": _public_meal(meal), "day_totals": summary["totals"], "left_to_goal": summary["left"]}
+    return _with_warning({"meal": _public_meal(meal), "day_totals": summary["totals"], "left_to_goal": summary["left"]},
+                         _kcal_warning(meal))
 
 
 @mcp.tool()
@@ -143,7 +164,7 @@ def save_product(name: str, kcal: float, protein: float, fat: float, carbs: floa
         p = db.save_product(conn, name, basis=basis, kcal=kcal, protein=protein, fat=fat, carbs=carbs,
                             grams=grams, category=category, aliases=aliases, fridge_add=fridge_add,
                             lactose=lactose, sugar=sugar, shelf=shelf)
-    return {"product": _public_product(p)}
+    return _with_warning({"product": _public_product(p)}, _kcal_warning(p))
 
 
 @mcp.tool()
@@ -182,7 +203,7 @@ def update_meal(meal_id: int, name: str | None = None, grams: float | None = Non
     with db.tx() as conn:
         m = db.update_meal(conn, meal_id, name=name, grams=grams, kcal=kcal, protein=protein, fat=fat, carbs=carbs,
                            description=description, when=when, slot=slot)
-    return {"meal": _public_meal(m) if m else None}
+    return _with_warning({"meal": _public_meal(m) if m else None}, _kcal_warning(m) if m else None)
 
 
 @mcp.tool()
@@ -202,7 +223,28 @@ def save_recipe(name: str, items: list[dict], cooked_grams: float, portion_grams
     with db.tx() as conn:
         r = db.save_recipe(conn, name, items, cooked_grams=cooked_grams, recipe_id=recipe_id,
                            portion_grams=portion_grams, to_fridge=to_fridge, deduct=deduct, kind=kind)
-    return {"recipe": r}
+    return _with_warning({"recipe": r}, *[_kcal_warning(i, f"Ингредиент «{i['name']}»") for i in r.get("items", [])])
+
+
+@mcp.tool()
+def find_kcal_mismatches(days: int | None = 30) -> dict:
+    """Найти неточности: позиции справочника и записи дневника, где ккал заметно не сходятся с БЖУ
+    (Б×4 + Ж×9 + У×4, разница от 10 ккал и от 10%). days: за сколько последних дней смотреть дневник
+    (по умолчанию 30, None — весь). Для каждой: записанные ккал (kcal), по БЖУ (by_macros) и разница."""
+    with db.tx() as conn:
+        r = db.kcal_mismatches(conn, days)
+    return {"products_count": len(r["products"]), "meals_count": len(r["meals"]), **r}
+
+
+@mcp.tool()
+def fix_kcal(meal_ids: list[int] | None = None, product_ids: list[int] | None = None,
+             with_products: bool = True) -> dict:
+    """Исправить ккал по БЖУ (ккал = Б×4 + Ж×9 + У×4) у записей дневника (meal_ids) и позиций справочника
+    (product_ids). Меняет только те, где есть заметное расхождение. with_products: заодно исправить
+    позицию справочника, из которой сделана запись, чтобы новые записи были точными."""
+    with db.tx() as conn:
+        r = db.fix_kcal(conn, meal_ids=meal_ids, product_ids=product_ids, with_products=with_products)
+    return {"fixed_meals": r["meals"], "fixed_products": r["products"]}
 
 
 @mcp.tool()
@@ -491,6 +533,13 @@ def api_update_meal(request, conn, body):
     if m is None:
         raise ValueError("meal not found")
     return {"meal": m, "day": db.day_summary(conn, m["meal_date"])}
+
+
+@api("/api/kcal-fix", ["POST"])
+def api_kcal_fix(request, conn, body):
+    r = db.fix_kcal(conn, meal_ids=body.get("meal_ids") or [], product_ids=body.get("product_ids") or [],
+                    with_products=bool(body.get("with_products", True)))
+    return {**r, "day": db.day_summary(conn, body["day"]) if body.get("day") else None}
 
 
 @api("/api/recipes", ["GET"])

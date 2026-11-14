@@ -131,6 +131,29 @@
     const t = p.protein * 4 + p.fat * 9 + p.carbs * 4;
     return t > 0 ? (p[m] * (m === 'fat' ? 9 : 4)) / t : 0;
   };
+  // calories must agree with P/F/C (4/9/4). A label or estimate that is off by 10 kcal and 10% (sugar
+  // alcohols, typos) is flagged so it can be fixed; P/F/C stay the source of truth.
+  const kcalByMacros = (x) => 4 * (Number(x.protein) || 0) + 9 * (Number(x.fat) || 0) + 4 * (Number(x.carbs) || 0);
+  const kcalOff = (x) => {
+    const k = Number(x.kcal) || 0, c = kcalByMacros(x), dd = k - c;
+    return Math.abs(dd) >= 10 && Math.abs(dd) >= 0.1 * Math.max(k, c) ? { calc: c, diff: dd } : null;
+  };
+  const offMark = (x) => (kcalOff(x) ? '<i class="koff" title="Калории не сходятся с БЖУ">!</i>' : '');
+  // live check under a form's kcal / P / F / C inputs, with a one-tap "take kcal from P/F/C"
+  function kcalCheck(f, box) {
+    const upd = () => {
+      const x = { kcal: f.kcal.value, protein: f.protein.value, fat: f.fat.value, carbs: f.carbs.value };
+      const off = f.kcal.value === '' ? null : kcalOff(x);
+      box.hidden = !off;
+      if (!off) return;
+      box.innerHTML = `<span>Калории не сходятся с БЖУ: указано <b>${fmt(x.kcal)}</b>, по БЖУ выходит <b>${fmt(off.calc)}</b> ккал.</span>
+        <button type="button">Взять ${fmt(off.calc)}</button>`;
+      box.querySelector('button').addEventListener('click', () => { f.kcal.value = fmt(off.calc, 1); f.kcal.dispatchEvent(new Event('input')); upd(); });
+    };
+    ['kcal', 'protein', 'fat', 'carbs'].forEach((k) => f[k].addEventListener('input', upd));
+    upd();
+    return upd;
+  }
   const SORTS = { default: 'Обычно', protein: 'Больше белка', carbs: 'Больше углеводов', fat: 'Меньше жира', kcal: 'Меньше ккал' };
   // per-100 g values when the weight is known, so portion and 100 g items compare fairly
   const per100 = (p) => (p.basis === '100g' ? p : p.grams ? Object.fromEntries(MACROS.map((m) => [m, (p[m] * 100) / p.grams])) : null);
@@ -353,6 +376,7 @@
     if (d.count) state.dayTotals[state.date] = { date: state.date, ...d.totals, n: d.count }; else delete state.dayTotals[state.date];
     renderWeeks();
     renderHero(d);
+    renderKcalNote(d);
     renderLeft(d);
     const box = $('#meals');
     box.innerHTML = '';
@@ -384,7 +408,7 @@
     li.innerHTML = `
       <div class="row">
         <div class="grow"><div class="name">${esc(title)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>
-        <div class="macros"><b>${fmt(m.kcal)}</b> <span class="k">ккал</span>
+        <div class="macros"><b>${fmt(m.kcal)}</b>${offMark(m)} <span class="k">ккал</span>
           <div class="mrow"><span><i class="dot protein"></i>${fmt(m.protein)}</span><span><i class="dot fat"></i>${fmt(m.fat)}</span><span><i class="dot carbs"></i>${fmt(m.carbs)}</span></div>
         </div>
         <span class="chev">›</span>
@@ -472,6 +496,23 @@
       <div class="minis">${minis}</div>`;
   }
 
+  // the day's entries whose calories disagree with their own P/F/C: how much it shifts the day, one-tap fix
+  function renderKcalNote(d) {
+    const box = $('#kcal-note');
+    const off = d.meals.filter((m) => kcalOff(m));
+    if (!off.length) { box.innerHTML = ''; return; }
+    const diff = off.reduce((a, m) => a + kcalOff(m).diff, 0);
+    const byMacros = d.meals.reduce((a, m) => a + kcalByMacros(m), 0);
+    box.innerHTML = `<div class="card kcal-note"><div><b>Калории не сходятся с БЖУ</b> в ${off.length} ${plural(off.length, 'записи', 'записях', 'записях')}
+        (${off.map((m) => esc(mealTitle(m).title)).join(', ')}): ${diff > 0 ? 'лишние' : 'недостающие'} ${fmt(Math.abs(diff))} ккал.
+        По БЖУ за день выходит <b>${fmt(byMacros)}</b> ккал.</div>
+      <button class="btn small" type="button">Исправить по БЖУ</button></div>`;
+    box.querySelector('button').addEventListener('click', async () => {
+      await api('/api/kcal-fix', { method: 'POST', body: { meal_ids: off.map((m) => m.id), with_products: true, day: d.date } });
+      toast('Калории пересчитаны по БЖУ'); state.goals = null; state.products = []; loadJournal();
+    });
+  }
+
   // add sheet: tick several foods from the fridge / catalogue or from recent entries, set each amount and
   // log them all at once; or type a meal by hand
   // amounts are typed in grams whenever the weight is known; the default is the whole dish:
@@ -516,11 +557,12 @@
         <label>Название <input name="name" required></label>
         <div class="row2"><label>Время <input name="time" type="time" value="${state.date === state.today ? nowHM() : '12:00'}"></label>
           <label>Приём <select name="slot">${SLOTS.map((s) => `<option value="${s}" ${s === slot ? 'selected' : ''}>${SLOT_ONE[s]}</option>`).join('')}</select></label></div>
-        <div class="row2"><label>Ккал <input name="kcal" type="number" inputmode="decimal" step="any" required></label>
+        <div class="row2"><label>Ккал <input name="kcal" type="number" inputmode="decimal" step="any" placeholder="по БЖУ"></label>
           <label>Вес, г <input name="grams" type="number" inputmode="decimal" step="any"></label></div>
         <div class="row3"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="0"></label>
           <label>Жиры <input name="fat" type="number" inputmode="decimal" step="any" value="0"></label>
           <label>Углев. <input name="carbs" type="number" inputmode="decimal" step="any" value="0"></label></div>
+        <div class="kcal-check" id="add-kcheck" hidden></div>
         <label>Состав <input name="description"></label>
         <button class="btn" type="submit">Записать</button>
       </form>
@@ -655,9 +697,11 @@
         sort = b.dataset.s; $$('#add-sort button', el).forEach((x) => x.classList.toggle('on', x === b)); render();
       }));
       render();
+      kcalCheck($('#add-manual', el), $('#add-kcheck', el));
       $('#add-manual', el).addEventListener('submit', async (e) => {
         e.preventDefault();
         const f = e.target;
+        if (f.kcal.value === '') f.kcal.value = fmt(kcalByMacros({ protein: f.protein.value, fat: f.fat.value, carbs: f.carbs.value }), 1);
         const body = { name: f.name.value, kcal: f.kcal.value, grams: f.grams.value || null, protein: f.protein.value, fat: f.fat.value,
           carbs: f.carbs.value, description: f.description.value, slot: f.slot.value, when: `${state.date}T${f.time.value || '12:00'}:00` };
         await api('/api/meals', { method: 'POST', body });
@@ -680,6 +724,7 @@
         <div class="row3"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="${m.protein}"></label>
           <label>Жиры <input name="fat" type="number" inputmode="decimal" step="any" value="${m.fat}"></label>
           <label>Углев. <input name="carbs" type="number" inputmode="decimal" step="any" value="${m.carbs}"></label></div>
+        <div class="kcal-check" id="edit-kcheck" hidden></div>
         <p class="muted" id="edit-hint" style="margin:2px 2px 0">${orig.grams ? 'Поменяешь вес, и КБЖУ пересчитаются сами.' : ''}</p>
         <label>Состав <input name="description" value="${esc(m.description || '')}"></label>
         <button class="btn" type="submit">Сохранить</button>
@@ -694,7 +739,9 @@
         if (manual || !orig.grams || !g) return;
         const k = g / orig.grams;
         for (const m2 of ['kcal', 'protein', 'fat', 'carbs']) f[m2].value = fmt(orig[m2] * k, 1);
+        updCheck();
       });
+      const updCheck = kcalCheck(f, $('#edit-kcheck', el));
       f.addEventListener('submit', async (e) => {
         e.preventDefault();
         const body = { name: f.name.value, slot: f.slot.value, grams: f.grams.value || null, kcal: f.kcal.value, protein: f.protein.value,
@@ -809,7 +856,7 @@
       <div class="row">
         <div class="pmain">
           <div class="name">${esc(p.name)}<span class="flags">${flags(p)}</span></div>
-          <div class="pmac"><span class="pk"><b>${fmt(p.kcal)}</b> ккал</span><span><i class="dot protein"></i>${fmt(p.protein)}</span><span><i class="dot fat"></i>${fmt(p.fat)}</span><span><i class="dot carbs"></i>${fmt(p.carbs)}</span></div>
+          <div class="pmac"><span class="pk"><b>${fmt(p.kcal)}</b>${offMark(p)} ккал</span><span><i class="dot protein"></i>${fmt(p.protein)}</span><span><i class="dot fat"></i>${fmt(p.fat)}</span><span><i class="dot carbs"></i>${fmt(p.carbs)}</span></div>
           <div class="pper">на ${per}${sortBadge(p, state.sort)}</div>
         </div>
         <div class="pside">
@@ -933,6 +980,7 @@
         <div class="row3"><label>Белки <input name="protein" type="number" inputmode="decimal" step="any" value="${p.protein}"></label>
           <label>Жиры <input name="fat" type="number" inputmode="decimal" step="any" value="${p.fat}"></label>
           <label>Углев. <input name="carbs" type="number" inputmode="decimal" step="any" value="${p.carbs}"></label></div>
+        <div class="kcal-check" id="p-kcheck" hidden></div>
         <div class="row2"><label>Категория <input name="category" value="${esc(p.category || '')}"></label>
           <label>Синонимы <input name="aliases" value="${esc(p.aliases || '')}"></label></div>
         <div class="checks"><label class="chk"><input type="checkbox" name="lactose" ${p.lactose ? 'checked' : ''}> 🥛 лактоза</label>
@@ -955,6 +1003,7 @@
           $$('button', sim).forEach((b) => b.addEventListener('click', () => editProduct(hits[Number(b.dataset.k)].x)));
         });
       }
+      kcalCheck(el.querySelector('form'), $('#p-kcheck', el));
       el.querySelector('form').addEventListener('submit', async (e) => {
         e.preventDefault();
         const f = e.target;

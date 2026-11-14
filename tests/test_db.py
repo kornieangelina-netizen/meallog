@@ -115,6 +115,25 @@ class DbTests(unittest.TestCase):
             self.assertEqual(a["weight"][-1]["kg"], 80.5)
             self.assertEqual(len(a["series"]), 7)
 
+    def test_kcal_mismatch_found_and_fixed(self):
+        """Calories that disagree with P/F/C (sugar-alcohol topping) are found, and fixing takes them from P/F/C."""
+        db = self.db
+        with db.tx() as c:
+            top = db.save_product(c, "Топпинг", basis="portion", kcal=140, protein=1, fat=0.5, carbs=10.5)
+            ok = db.save_product(c, "Творог", basis="portion", kcal=100, protein=18, fat=1, carbs=3)
+            self.assertIsNotNone(db.kcal_check(top))
+            self.assertIsNone(db.kcal_check(ok))
+            m1 = db.log_product(c, top["id"], portions=1)
+            m2 = db.log_product(c, ok["id"], portions=1)
+            found = db.kcal_mismatches(c)
+            self.assertEqual([p["id"] for p in found["products"]], [top["id"]])
+            self.assertEqual([m["id"] for m in found["meals"]], [m1["id"]])
+            r = db.fix_kcal(c, meal_ids=[m1["id"], m2["id"]])
+            self.assertEqual(r, {"meals": [m1["id"]], "products": [top["id"]]})
+            self.assertAlmostEqual(db.get_meal(c, m1["id"])["kcal"], 50.5)
+            self.assertAlmostEqual(db.get_product(c, top["id"])["kcal"], 50.5)
+            self.assertEqual(db.get_meal(c, m2["id"])["kcal"], 100)
+            self.assertEqual(db.kcal_mismatches(c), {"products": [], "meals": []})
 
 if __name__ == "__main__":
     unittest.main()
