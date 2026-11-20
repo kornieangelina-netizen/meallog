@@ -184,6 +184,12 @@ CREATE TABLE IF NOT EXISTS push_subs (
     created_at TEXT
 );
 
+-- cheat days («читмил»): stay in the journal but are left out of analytics, averages and suggestions
+CREATE TABLE IF NOT EXISTS cheat_days (
+    date TEXT PRIMARY KEY,
+    created_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -517,7 +523,7 @@ def import_rows(conn, rows: list[dict], clear_imported: bool = False) -> dict:
     return {"imported": n, "deleted": deleted}
 
 
-EXPORT_TABLES = ["meals", "products", "recipes", "recipe_items", "goals", "weight_log", "measurements", "kv"]
+EXPORT_TABLES = ["meals", "products", "recipes", "recipe_items", "goals", "weight_log", "measurements", "cheat_days", "kv"]
 
 
 def export_data(conn, since: str | None = None) -> dict:
@@ -686,7 +692,30 @@ def day_summary(conn, day: str | None = None) -> dict:
         h = t.hour + t.minute / 60
         pace = round(min(1.0, max(0.0, (h - 7) / 15)), 2)
     return {"date": day, "meals": meals, "totals": totals, "goals": goals, "left": left,
-            "percent": pct, "pace": pace, "count": len(meals)}
+            "percent": pct, "pace": pace, "count": len(meals), "cheat": is_cheat_day(conn, day)}
+
+
+# --------------------------------------------------------------------------- #
+# cheat days
+# --------------------------------------------------------------------------- #
+
+def is_cheat_day(conn, day: str) -> bool:
+    return conn.execute("SELECT 1 FROM cheat_days WHERE date=?", (day,)).fetchone() is not None
+
+
+def set_cheat_day(conn, day: str | None = None, on: bool = True) -> dict:
+    day = date.fromisoformat(day or today()).isoformat()
+    if on:
+        conn.execute("INSERT OR IGNORE INTO cheat_days (date, created_at) VALUES (?, ?)",
+                     (day, now_local().isoformat(timespec="seconds")))
+    else:
+        conn.execute("DELETE FROM cheat_days WHERE date=?", (day,))
+    return {"date": day, "cheat": on}
+
+
+def cheat_days(conn, start: str | None = None, end: str | None = None) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT date FROM cheat_days WHERE date BETWEEN ? AND ? ORDER BY date",
+                                       (start or "0000-01-01", end or "9999-12-31"))]
 
 
 # --------------------------------------------------------------------------- #
@@ -1055,10 +1084,14 @@ def analytics(conn, days: int | None = 30, start: str | None = None, end: str | 
 
     # today is still going on: it stays in the series (drawn faded) but not in averages and weekdays
     today_s = now_local().date().isoformat()
+    # cheat days are shown as such but count nowhere: not in averages, weekdays, hours or top foods
+    cheat = set(cheat_days(conn, s, e))
     for x in series:
         if x["date"] == today_s:
             x["partial"] = True
-    logged = [x for x in series if x["n"] and not x.get("partial")]
+        if x["date"] in cheat:
+            x["cheat"] = True
+    logged = [x for x in series if x["n"] and not x.get("partial") and not x.get("cheat")]
     avg = {m: (round(sum(x[m] for x in logged) / len(logged), 1) if logged else 0) for m in MACROS}
 
     # per weekday (0 = Monday): average over logged days of that weekday
@@ -1074,8 +1107,10 @@ def analytics(conn, days: int | None = 30, start: str | None = None, end: str | 
 
     # per hour: average per logged day, so the profile does not scale with window length
     hours = [{m: 0.0 for m in MACROS} for _ in range(24)]
-    for r in conn.execute("SELECT logged_at, kcal, protein, fat, carbs FROM meals WHERE meal_date BETWEEN ? AND ?",
+    for r in conn.execute("SELECT logged_at, meal_date, kcal, protein, fat, carbs FROM meals WHERE meal_date BETWEEN ? AND ?",
                           (s, e)):
+        if r["meal_date"] in cheat:
+            continue
         try:
             h = datetime.fromisoformat(r["logged_at"]).hour
         except ValueError:
@@ -1085,21 +1120,24 @@ def analytics(conn, days: int | None = 30, start: str | None = None, end: str | 
     nd = max(1, len(logged))
     hours = [{m: round(x[m] / nd, 1) for m in MACROS} for x in hours]
 
-    # streak: consecutive days with at least one entry, ending today or yesterday
+    # streak: consecutive days with at least one entry, ending today or yesterday;
+    # a cheat day does not break it and does not add to it
     streak = 0
     all_dates = {r[0] for r in conn.execute("SELECT DISTINCT meal_date FROM meals")}
+    all_cheat = set(cheat_days(conn))
     d = now_local().date()
     if d.isoformat() not in all_dates:
         d -= timedelta(days=1)
-    while d.isoformat() in all_dates:
-        streak += 1
+    while d.isoformat() in all_dates or d.isoformat() in all_cheat:
+        if d.isoformat() not in all_cheat:
+            streak += 1
         d -= timedelta(days=1)
 
     top = top_foods(conn, s, e)
     weight = _rows(conn.execute("SELECT * FROM weight_log WHERE date BETWEEN ? AND ? ORDER BY date", (s, e)))
     measurements = _rows(conn.execute("SELECT * FROM measurements WHERE date BETWEEN ? AND ? ORDER BY date", (s, e)))
     return {"start": s, "end": e, "days": len(series), "series": series, "avg": avg, "logged_days": len(logged),
-            "weekday": weekday, "hours": hours, "streak": streak, "top": top, "weight": weight,
+            "weekday": weekday, "hours": hours, "streak": streak, "cheat_days": sorted(cheat), "top": top, "weight": weight,
             "measurements": measurements, "goals": get_goals(conn), "goals_history": goals_history(conn),
             "first_date": first_meal_date(conn)}
 
@@ -1119,6 +1157,7 @@ def top_foods(conn, start: str, end: str, limit: int = 10) -> list[dict]:
         """SELECT name, COUNT(*) n, SUM(kcal) kcal, SUM(protein) protein, SUM(fat) fat, SUM(carbs) carbs
            FROM meals WHERE meal_date BETWEEN ? AND ? AND name NOT IN ('Завтрак', 'Обед', 'Ужин', 'Перекус',
                  'Перекус 1', 'Перекус 2', 'Перекус/Другое')
+                 AND meal_date NOT IN (SELECT date FROM cheat_days)
            GROUP BY name""", (start, end)))
     products = [(p["name"], _name_words(p["name"])) for p in conn.execute("SELECT name FROM products")]
     by_words = {w: n for n, w in products}

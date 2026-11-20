@@ -159,6 +159,27 @@ class AnalyticsTests(unittest.TestCase):
             db.set_goals(c, protein=150)
             self.assertEqual(db.goals_history(c)[-1]["protein"], 150)
 
+    def test_cheat_day_left_out_of_analytics(self):
+        db = self.db
+        with db.tx() as c:
+            d1 = (db.now_local().date() - db.timedelta(days=1)).isoformat()
+            d2 = (db.now_local().date() - db.timedelta(days=2)).isoformat()
+            d3 = (db.now_local().date() - db.timedelta(days=3)).isoformat()
+            db.log_meal(c, "Курица", 300, 40, 10, 0, when=f"{d1}T13:00")
+            db.log_meal(c, "Пицца", 2500, 80, 120, 260, when=f"{d2}T19:00")
+            db.log_meal(c, "Курица", 300, 40, 10, 0, when=f"{d3}T13:00")
+            db.set_cheat_day(c, d2)
+            self.assertTrue(db.day_summary(c, d2)["cheat"])
+            a = db.analytics(c, 7)
+            self.assertEqual(a["avg"]["kcal"], 300)
+            self.assertEqual(a["logged_days"], 2)
+            self.assertEqual(a["cheat_days"], [d2])
+            self.assertNotIn("Пицца", {t["name"] for t in a["top"]})
+            self.assertEqual(a["streak"], 2)  # the cheat day does not break the streak
+            db.set_cheat_day(c, d2, on=False)
+            self.assertFalse(db.day_summary(c, d2)["cheat"])
+            self.assertEqual(db.analytics(c, 7)["logged_days"], 3)
+
 
 class PasswordTests(unittest.TestCase):
     setUp = DbTests.setUp

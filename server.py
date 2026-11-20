@@ -248,6 +248,16 @@ def fix_kcal(meal_ids: list[int] | None = None, product_ids: list[int] | None = 
 
 
 @mcp.tool()
+def set_cheat_day(day: str | None = None, on: bool = True) -> dict:
+    """Отметить день как читмил (on=True) или снять отметку (on=False). day: YYYY-MM-DD, по умолчанию
+    сегодня. Записи дня остаются в дневнике, но день не входит в аналитику: средние, графики, карту дней,
+    «по дням недели», «чаще всего»; серию дней с записями не прерывает. Подсказка «Осталось» на нём не
+    показывается."""
+    with db.tx() as conn:
+        return db.set_cheat_day(conn, day, on)
+
+
+@mcp.tool()
 def list_recipes() -> dict:
     """Сохранённые рецепты с ингредиентами, итогами и КБЖУ на 100 г готового блюда."""
     with db.tx() as conn:
@@ -738,7 +748,14 @@ def api_days(request, conn, body):
     """Per-day totals for the calendar: ?start=YYYY-MM-DD&end=YYYY-MM-DD (max ~1 year)."""
     q = request.query_params
     start, end = q.get("start") or db.today(), q.get("end") or db.today()
-    return {"days": db.day_totals(conn, start, end), "goals": db.get_goals(conn), "today": db.today()}
+    return {"days": db.day_totals(conn, start, end), "goals": db.get_goals(conn), "today": db.today(),
+            "cheat": db.cheat_days(conn, start, end)}
+
+
+@api("/api/cheat", ["POST"])
+def api_cheat(request, conn, body):
+    """{date, on}: mark or unmark a cheat day."""
+    return db.set_cheat_day(conn, body.get("date"), bool(body.get("on", True)))
 
 
 # --------------------------------------------------------------------------- #
