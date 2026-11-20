@@ -16,6 +16,7 @@
   --fat: #ee5fae;
   --carbs: #ff9333;
   --danger: #ff5a6e;
+  --cheat: #b98cff;
   --radius: 18px;
   --radius-s: 12px;
   --glow-kcal: rgba(43, 207, 142, .45);
@@ -710,3 +711,21 @@ body.modal-open { overflow: hidden; }
 .kcal-check button { flex: none; border: 0; border-radius: 10px; padding: 7px 11px; background: rgba(255, 147, 51, .22);
   color: var(--text); font-size: 13px; cursor: pointer; }
 @media (max-width: 420px) { .kcal-note { flex-direction: column; align-items: stretch; } }
+
+/* ---------- 20 Nov: cheat day («читмил») ---------- */
+.cheat-btn { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 10px; padding: 9px 14px;
+  background: none; border: 1px dashed rgba(185, 140, 255, .35); border-radius: var(--radius-s); color: var(--cheat); font-size: 14px; }
+.cheat-btn span { font-weight: 600; }
+.cheat-btn small { margin-left: auto; color: var(--muted); font-size: 12px; }
+.cheat-btn:active { background: rgba(185, 140, 255, .1); }
+.cheat-card { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 12px 14px;
+  border-color: rgba(185, 140, 255, .4); background: linear-gradient(135deg, rgba(185, 140, 255, .16), rgba(15, 21, 38, .82)); }
+.cheat-card .cc-ic { color: var(--cheat); display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%;
+  background: rgba(185, 140, 255, .16); flex: none; }
+.cheat-card b { display: block; color: var(--cheat); font-size: 15px; }
+.cheat-card .grow span { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+.cheat-card .cheat-off { flex: none; border: 1px solid var(--line); background: none; color: var(--muted); border-radius: 14px; padding: 6px 12px; font-size: 12.5px; }
+.day.cheat .ring b { color: var(--cheat); }
+.cal-grid .d.cheat span { color: var(--cheat); font-weight: 700; }
+.hc.cheat { background: var(--cheat); opacity: .8; }
+.cheat-note { display: flex; align-items: center; gap: 6px; }

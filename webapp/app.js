@@ -24,6 +24,10 @@
   const MEAS = [['hips', 'ОБ', '#ee5fae'], ['chest', 'ОГ', '#3dbbf5'], ['waist', 'ОТ', '#c9d2ff']];
   const css = getComputedStyle(document.documentElement);
   const COLOR = Object.fromEntries(MACROS.map((m) => [m, css.getPropertyValue(`--${m}`).trim()]));
+  COLOR.cheat = css.getPropertyValue('--cheat').trim() || '#b98cff';
+  // cheat days («читмил»): kept in the journal, left out of analytics; marked violet everywhere
+  let cheatSet = new Set();
+  const isCheat = (d) => cheatSet.has(d);
 
   const state = {
     tab: 'journal',
@@ -230,11 +234,13 @@
     const start = addDays(end, -400);
     const d = await api(`/api/days?start=${start}&end=${end}`);
     state.dayTotals = Object.fromEntries(d.days.map((x) => [x.date, x]));
+    cheatSet = new Set(d.cheat || []);
     state.goals = d.goals;
     if (d.days.length) state.firstDate = d.days[0].date;
   }
 
   function dayRing(s, size, stroke) {
+    if (isCheat(s)) return ring(size, stroke, 1, COLOR.cheat, { glow: false });
     const t = state.dayTotals[s];
     const goal = (state.goals && state.goals.kcal) || 1;
     const pct = t ? t.kcal / goal : 0;
@@ -256,7 +262,7 @@
         html += `<div class="week" data-week="${w}">`;
         for (let i = 0; i < 7; i++) {
           const d = addDays(w, i);
-          const cls = ['day', d === state.today ? 'today' : '', d > maxDate() ? 'future' : ''].join(' ');
+          const cls = ['day', d === state.today ? 'today' : '', d > maxDate() ? 'future' : '', isCheat(d) ? 'cheat' : ''].join(' ');
           html += `<button class="${cls}" data-date="${d}" ${d > maxDate() ? 'disabled' : ''}>
             <span class="wd">${WEEKDAYS[i]}</span>
             <span class="ring">${dayRing(d, 34, 3)}<b>${parse(d).getDate()}</b></span></button>`;
@@ -267,7 +273,7 @@
       $$('.day', box).forEach((b) => b.addEventListener('click', () => setDate(b.dataset.date)));
     } else {
       // refresh rings in place (totals may have changed)
-      $$('.day', box).forEach((b) => { b.querySelector('.ring svg').outerHTML = dayRing(b.dataset.date, 34, 3); });
+      $$('.day', box).forEach((b) => { b.querySelector('.ring svg').outerHTML = dayRing(b.dataset.date, 34, 3); b.classList.toggle('cheat', isCheat(b.dataset.date)); });
     }
     $$('.day', box).forEach((b) => b.classList.toggle('on', b.dataset.date === state.date));
     const d = parse(state.date);
@@ -309,20 +315,22 @@
     for (let d = 1; d <= daysIn; d++) {
       const s = `${y}-${pad2(m)}-${pad2(d)}`;
       const future = s > maxDate();
-      const cls = ['d', s === state.date ? 'on' : '', s === state.today ? 'today' : '', future ? 'future' : ''].join(' ');
+      const cls = ['d', s === state.date ? 'on' : '', s === state.today ? 'today' : '', future ? 'future' : '', isCheat(s) ? 'cheat' : ''].join(' ');
       const t = state.dayTotals[s];
-      const pdot = t && s < state.today && proteinOk(t.protein) ? '<i class="pdot"></i>' : '';
+      const pdot = t && s < state.today && !isCheat(s) && proteinOk(t.protein) ? '<i class="pdot"></i>' : '';
       cells += `<button class="${cls}" data-date="${s}" ${future ? 'disabled' : ''}>${future ? '' : dayRing(s, 40, 2.5)}<span>${d}</span>${pdot}</button>`;
     }
-    const monthTotals = Object.values(state.dayTotals).filter((t) => t.date.startsWith(state.pickerMonth));
+    const monthTotals = Object.values(state.dayTotals).filter((t) => t.date.startsWith(state.pickerMonth) && !isCheat(t.date));
+    const monthCheat = [...cheatSet].filter((x) => x.startsWith(state.pickerMonth)).length;
     const avg = monthTotals.length ? Math.round(monthTotals.reduce((a, t) => a + t.kcal, 0) / monthTotals.length) : null;
     $('#cal').innerHTML = `
       <div class="cal-head"><button id="cal-prev">‹</button><b>${MONTHS_NOM[m - 1]} ${y}</b><button id="cal-next">›</button></div>
       <div class="cal-grid">${cells}</div>
       <div class="cal-legend"><span><i style="background:${COLOR.kcal}"></i>кольцо = калории от нормы</span>
         <span><i style="background:${COLOR.carbs}"></i>выше нормы</span>
-        <span><i style="background:${COLOR.protein}"></i>белок ${PROTEIN_OK[0]}–${PROTEIN_OK[1]} г</span></div>
-      <p class="muted" style="margin:10px 0 0">${monthTotals.length ? `${monthTotals.length} ${plural(monthTotals.length, 'день', 'дня', 'дней')} с записями, в среднем ${avg} ккал` : 'В этом месяце записей нет'}</p>`;
+        <span><i style="background:${COLOR.protein}"></i>белок ${PROTEIN_OK[0]}–${PROTEIN_OK[1]} г</span>
+        <span><i style="background:${COLOR.cheat}"></i>читмил</span></div>
+      <p class="muted" style="margin:10px 0 0">${monthTotals.length ? `${monthTotals.length} ${plural(monthTotals.length, 'день', 'дня', 'дней')} с записями, в среднем ${avg} ккал` : 'В этом месяце записей нет'}${monthCheat ? `, ${monthCheat} ${plural(monthCheat, 'читмил', 'читмила', 'читмилов')} не в счёт` : ''}</p>`;
     $('#cal-prev').addEventListener('click', () => { state.pickerMonth = shiftMonth(state.pickerMonth, -1); renderMonth(); });
     $('#cal-next').addEventListener('click', () => { state.pickerMonth = shiftMonth(state.pickerMonth, 1); renderMonth(); });
     $$('.cal-grid .d[data-date]').forEach((b) => b.addEventListener('click', () => { closeModal(); setDate(b.dataset.date); }));
@@ -374,13 +382,15 @@
     state.goals = d.goals;
     state.day = d;
     if (d.count) state.dayTotals[state.date] = { date: state.date, ...d.totals, n: d.count }; else delete state.dayTotals[state.date];
+    if (d.cheat) cheatSet.add(d.date); else cheatSet.delete(d.date);
     renderWeeks();
     renderHero(d);
+    renderCheat(d);
     renderKcalNote(d);
     renderLeft(d);
     const box = $('#meals');
     box.innerHTML = '';
-    $('#meals-empty').hidden = d.meals.length > 0;
+    $('#meals-empty').hidden = d.meals.length > 0 || d.cheat;
     const bySlot = {};
     for (const m of d.meals) (bySlot[m.slot || 'snack'] = bySlot[m.slot || 'snack'] || []).push(m);
     for (const slot of SLOTS) {
@@ -438,7 +448,7 @@
   function renderLeft(d) {
     const box = $('#left-card');
     const left = Object.fromEntries(MACROS.map((m) => [m, Math.max(0, d.left[m])]));
-    if (state.date < state.today || !d.goals.kcal) { box.innerHTML = ''; return; }
+    if (state.date < state.today || !d.goals.kcal || d.cheat) { box.innerHTML = ''; return; }
     const onDay = state.date === state.today ? 'на сегодня' : `на ${dateTitle(state.date).toLowerCase()}`;
     if (left.kcal < 60) {
       box.innerHTML = `<div class="card left-card done"><b>Норма ${onDay} закрыта</b><span>${d.totals.kcal > d.goals.kcal ? `сверх нормы ${fmt(d.totals.kcal - d.goals.kcal)} ккал` : 'осталось меньше 60 ккал'}</span></div>`;
@@ -471,6 +481,24 @@
     $('[data-all]', box).addEventListener('click', () => { state.leftAll = !state.leftAll; renderLeft(d); });
     $$('.lc-item', box).forEach((b) => b.addEventListener('click', () => { const x = picks[Number(b.dataset.i)]; quickLog(x.p, null, x.a); }));
   }
+
+  // «Читмил»: one tap takes the day out of analytics (entries stay); tap again to bring it back
+  function renderCheat(d) {
+    const box = $('#cheat-row');
+    box.innerHTML = d.cheat
+      ? `<div class="card cheat-card"><span class="cc-ic">${CHEAT_ICON}</span>
+          <div class="grow"><b>Читмил</b><span>День не входит в аналитику: ни в средние, ни в графики.${d.count ? ' Записи остаются здесь.' : ''}</span></div>
+          <button type="button" class="cheat-off">Убрать</button></div>`
+      : `<button type="button" class="cheat-btn">${CHEAT_ICON}<span>Читмил</span><small>убрать день из аналитики</small></button>`;
+    box.querySelector('button').addEventListener('click', async () => {
+      const on = !d.cheat;
+      await api('/api/cheat', { method: 'POST', body: { date: d.date, on } });
+      toast(on ? 'Отмечено как читмил' : 'День снова в аналитике');
+      state.analytics = null;
+      loadJournal();
+    });
+  }
+  const CHEAT_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 21 4.2 7.2Q12 2.6 19.8 7.2Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M5.6 9.6Q12 6 18.4 9.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="10.2" cy="12.3" r="1.3" fill="currentColor"/><circle cx="13.6" cy="11.4" r="1.1" fill="currentColor"/><circle cx="12" cy="15.6" r="1.1" fill="currentColor"/></svg>';
 
   function renderHero(d) {
     const goal = d.goals.kcal || 1;
@@ -1271,7 +1299,10 @@
     const box = $('#analytics');
     box.style.opacity = '.5';
     try {
-      state.analytics = await api(`/api/analytics?days=${state.period}`);
+      const a = await api(`/api/analytics?days=${state.period}`);
+      // a cheat day counts nowhere: drawn as an empty day on the charts, violet on the day map
+      for (const x of a.series) if (x.cheat) { x.realN = x.n; x.n = 0; for (const m of MACROS) x[m] = 0; }
+      state.analytics = a;
       renderAnalytics();
     } finally { box.style.opacity = ''; }
   }
@@ -1345,7 +1376,9 @@
       return out;
     })();
     const lastM = ms.length ? ms[ms.length - 1] : null, prevM = ms.length > 1 ? ms[ms.length - 2] : null;
-    const todayNote = a.series.some((s) => s.partial && s.n) ? '<p class="muted partial-note">Сегодняшний день ещё идёт: на графиках он бледный и в средние не входит.</p>' : '';
+    const nCheat = (a.cheat_days || []).length;
+    const todayNote = (a.series.some((s) => s.partial && s.n) ? '<p class="muted partial-note">Сегодняшний день ещё идёт: на графиках он бледный и в средние не входит.</p>' : '')
+      + (nCheat ? `<p class="muted partial-note cheat-note"><i class="dot" style="background:${COLOR.cheat}"></i>${nCheat} ${plural(nCheat, 'день', 'дня', 'дней')} читмила ${periodName} не ${nCheat === 1 ? 'входит' : 'входят'} в расчёты.</p>` : '');
     const mDelta = (k) => (lastM && prevM && lastM[k] != null && prevM[k] != null ? lastM[k] - prevM[k] : null);
     const mVal = (k, label) => lastM && lastM[k] != null ? `<div class="bv"><span>${label}</span><b>${fmt(lastM[k], 1)}</b><small>см${mDelta(k) != null ? ` · ${mDelta(k) > 0 ? '+' : ''}${fmt(mDelta(k), 1)}` : ''}</small></div>` : '';
 
@@ -1398,7 +1431,7 @@
       </div>
 
       ${a.series.length >= 60 ? `<div class="card chart-card"><div class="ch"><b>Карта дней</b><span>калории от нормы, нажми на день</span></div><div class="heat" id="ch-heat"></div>
-        <div class="legend"><span><i class="sw" style="background:rgba(255,255,255,.07)"></i>нет записей</span><span><i class="sw" style="background:${COLOR.kcal};opacity:.45"></i>меньше нормы</span><span><i class="sw" style="background:${COLOR.kcal}"></i>в норме</span><span><i class="sw" style="background:${COLOR.carbs}"></i>выше</span></div></div>` : ''}
+        <div class="legend"><span><i class="sw" style="background:rgba(255,255,255,.07)"></i>нет записей</span><span><i class="sw" style="background:${COLOR.kcal};opacity:.45"></i>меньше нормы</span><span><i class="sw" style="background:${COLOR.kcal}"></i>в норме</span><span><i class="sw" style="background:${COLOR.carbs}"></i>выше</span>${nCheat ? `<span><i class="sw" style="background:${COLOR.cheat}"></i>читмил</span>` : ''}</div></div>` : ''}
 
       <div class="card chart-card"><div class="ch"><b>Тело</b><span>${w.length ? `${fmt(w[w.length - 1].kg, 1)} кг${wDelta != null ? `, ${wDelta > 0 ? '+' : ''}${fmt(wDelta, 1)} ${periodName}` : ''}` : 'вес и объёмы'}</span></div>
         ${w.length > 1 ? '<div class="chart" id="ch-weight"></div>' : `<p class="muted" style="margin:4px 2px 6px">${w.length ? 'Одна запись веса за период.' : 'Веса за этот период нет. Записывай его на вкладке «Цели».'}</p>`}
@@ -1710,6 +1743,7 @@
     const months = [];
     for (const d of opts.series) { const m = d.date.slice(0, 7); if (months[months.length - 1] !== m) months.push(m); }
     const cellCls = (d) => {
+      if (d && d.cheat) return 'cheat';
       if (!d || !d.n) return 'none';
       if (d.partial) return 'part';
       const r = d.kcal / (opts.goalOn(d.date) || 1);
